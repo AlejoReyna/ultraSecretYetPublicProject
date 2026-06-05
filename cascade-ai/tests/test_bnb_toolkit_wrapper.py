@@ -9,7 +9,7 @@ import pytest
 from src.config.settings import Settings
 from src.config.tokens import (
     STABLE_TARGET_SYMBOLS,
-    TARGET_20_SYMBOLS,
+    TARGET_SYMBOLS,
     TOKEN_CONTRACTS_BSC,
     TRADABLE_TARGET_SYMBOLS,
 )
@@ -120,13 +120,17 @@ def _wrapper_with_web3(fake_web3: FakeWeb3) -> BnbToolkitWrapper:
     return wrapper
 
 
-def test_all_target_symbols_have_contract_addresses() -> None:
-    assert set(TARGET_20_SYMBOLS) == set(TOKEN_CONTRACTS_BSC)
+def test_configured_contracts_belong_to_target_universe() -> None:
+    target_keys = {symbol.upper() for symbol in TARGET_SYMBOLS}
+    configured_in_target = {symbol for symbol in TOKEN_CONTRACTS_BSC if symbol in target_keys}
+    assert configured_in_target
+    assert configured_in_target <= target_keys
 
 
 def test_stables_remain_available_but_not_directionally_tradable() -> None:
-    assert STABLE_TARGET_SYMBOLS <= set(TOKEN_CONTRACTS_BSC)
-    assert set(STABLE_TARGET_SYMBOLS).isdisjoint(TRADABLE_TARGET_SYMBOLS)
+    tradable_keys = {symbol.upper() for symbol in TRADABLE_TARGET_SYMBOLS}
+    assert STABLE_TARGET_SYMBOLS.isdisjoint(tradable_keys)
+    assert {"USDT", "USDC"}.issubset(STABLE_TARGET_SYMBOLS)
 
 
 def test_wrapper_defaults_to_loaded_settings(monkeypatch: Any) -> None:

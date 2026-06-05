@@ -11,7 +11,7 @@ import httpx
 import requests
 
 from src.config.settings import Settings
-from src.config.tokens import TARGET_20_SYMBOLS, get_cmc_id
+from src.config.tokens import TARGET_SYMBOL_BY_KEY, get_cmc_id_optional
 from src.data.x402_client import X402Client
 from src.data.x402_payment import write_402_response
 
@@ -270,15 +270,27 @@ class CMCMCPClient:
     def fetch_market_snapshot(self, symbols: list[str]) -> dict[str, Any]:
         """Fetch and normalize the combined market snapshot for strategy evaluation."""
 
-        normalized_symbols = [symbol.upper() for symbol in symbols if symbol.upper() in TARGET_20_SYMBOLS]
-        quotes = self.get_crypto_quotes_latest(normalized_symbols)
+        normalized_symbols = self._normalize_target_symbols(symbols)
+        if not normalized_symbols:
+            return {}
+
+        quotes = self._fetch_combined_payload(
+            normalized_symbols,
+            self.get_crypto_quotes_latest,
+        )
         if not quotes:
             LOGGER.warning("CMC quotes unavailable; skipping remaining market snapshot calls")
             return {}
 
-        technicals = self.get_crypto_technical_analysis(normalized_symbols)
+        technicals = self._fetch_combined_payload(
+            normalized_symbols,
+            self.get_crypto_technical_analysis,
+        )
         derivatives = self.get_global_crypto_derivatives_metrics()
-        market_metrics = self.get_crypto_market_metrics(normalized_symbols)
+        market_metrics = self._fetch_combined_payload(
+            normalized_symbols,
+            self.get_crypto_market_metrics,
+        )
 
         quotes_by_symbol = self._by_symbol(quotes)
         technicals_by_symbol = self._by_symbol(technicals)
@@ -529,9 +541,45 @@ class CMCMCPClient:
                     return found
         return None
 
+    _SNAPSHOT_BATCH_SIZE = 50
+
+    @classmethod
+    def _normalize_target_symbols(cls, symbols: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            key = symbol.strip().upper()
+            if key not in TARGET_SYMBOL_BY_KEY or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(key)
+        return normalized
+
+    @classmethod
+    def _fetch_combined_payload(
+        cls,
+        symbols: list[str],
+        fetcher: Any,
+    ) -> dict[str, Any]:
+        if not symbols:
+            return {}
+        if len(symbols) <= cls._SNAPSHOT_BATCH_SIZE:
+            return fetcher(symbols)
+
+        combined: dict[str, Any] = {}
+        for start in range(0, len(symbols), cls._SNAPSHOT_BATCH_SIZE):
+            batch = symbols[start : start + cls._SNAPSHOT_BATCH_SIZE]
+            payload = fetcher(batch)
+            if not payload:
+                continue
+            batch_by_symbol = cls._by_symbol(payload)
+            combined.update(batch_by_symbol)
+        return combined
+
     @staticmethod
     def _symbols_to_id_arg(symbols: list[str]) -> str:
-        return ",".join(get_cmc_id(symbol) for symbol in symbols)
+        ids = [cmc_id for symbol in symbols if (cmc_id := get_cmc_id_optional(symbol))]
+        return ",".join(ids)
 
     @staticmethod
     def _symbols_to_symbol_arg(symbols: list[str]) -> str:

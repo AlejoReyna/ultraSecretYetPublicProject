@@ -293,6 +293,13 @@ def test_eligible_rules_list_contains_149_entries() -> None:
     assert len(ELIGIBLE_149_SYMBOLS) == 149
 
 
+def test_target_symbols_are_deduplicated_eligible_universe() -> None:
+    from src.config.tokens import TARGET_SYMBOLS
+
+    assert len(TARGET_SYMBOLS) == 148
+    assert len(TARGET_SYMBOLS) == len(set(TARGET_SYMBOLS))
+
+
 def test_liquidity_blacklist_marks_live_illiquid_symbols_untradeable() -> None:
     assert is_liquid({"symbol": "lisUSD", "volume_24h": 100_000_000.0, "market_cap": 1_000_000_000.0}) is False
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config.settings import Settings, load_settings
-from src.config.tokens import TARGET_20_SYMBOLS, TRADABLE_TARGET_SYMBOLS
+from src.config.tokens import TARGET_SYMBOLS, TRADABLE_TARGET_SYMBOLS, has_bsc_contract
 from src.data.cmc_mcp_client import CMCMCPClient
 from src.execution.bnb_toolkit_wrapper import BnbToolkitWrapper
 from src.execution.decision_log import DecisionAction, log_decision
@@ -143,7 +143,7 @@ def run_live_preflight(settings: Settings) -> bool:
     snapshot: dict[str, Any] = {}
     try:
         cmc_client = CMCMCPClient(settings)
-        fetched_snapshot = cmc_client.fetch_market_snapshot(TARGET_20_SYMBOLS)
+        fetched_snapshot = cmc_client.fetch_market_snapshot(TARGET_SYMBOLS)
         if isinstance(fetched_snapshot, dict):
             snapshot = fetched_snapshot
             record("CMC/x402 market snapshot", bool(snapshot), f"{len(snapshot)} item(s)")
@@ -242,7 +242,7 @@ def _priced_target_symbols(snapshot: dict[str, Any]) -> list[str]:
         if not isinstance(value, dict):
             continue
         symbol = str(value.get("symbol") or key).upper()
-        if symbol in TARGET_20_SYMBOLS and _maybe_number(value.get("price")) is not None:
+        if symbol in {item.upper() for item in TARGET_SYMBOLS} and _maybe_number(value.get("price")) is not None:
             priced.append(symbol)
     return priced
 
@@ -390,7 +390,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
 def _fetch_snapshot(settings: Settings, cmc_client: CMCMCPClient) -> dict[str, dict[str, Any]]:
     if settings.paper_trade:
         return _paper_market_snapshot()
-    return cmc_client.fetch_market_snapshot(TARGET_20_SYMBOLS)
+    return cmc_client.fetch_market_snapshot(TARGET_SYMBOLS)
 
 
 def _load_positions_or_reconstruct(
@@ -423,6 +423,8 @@ def _reconstruct_positions_from_balances(
 
     reconstructed = 0
     for symbol in TRADABLE_TARGET_SYMBOLS:
+        if not has_bsc_contract(symbol):
+            continue
         balance_response = toolkit.get_balance(symbol)
         amount_tokens = _extract_symbol_balance(balance_response, symbol)
         if amount_tokens <= 0:
@@ -638,7 +640,7 @@ def _portfolio_value_usdc(
 
 def _paper_market_snapshot() -> dict[str, dict[str, Any]]:
     baseline: dict[str, dict[str, Any]] = {}
-    for symbol in TARGET_20_SYMBOLS:
+    for symbol in TARGET_SYMBOLS:
         baseline[symbol] = {
             "symbol": symbol,
             "price": 1.0,
