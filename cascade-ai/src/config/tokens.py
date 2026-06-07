@@ -324,6 +324,12 @@ def get_bsc_token_address(symbol: str) -> str:
         ) from exc
 
 
+def resolve_cmc_coin_id(symbol: str) -> str | None:
+    """Return a configured CoinMarketCap ID without TARGET_SYMBOLS gating."""
+
+    return CMC_IDS_BY_SYMBOL.get(symbol.strip().upper())
+
+
 def get_cmc_id_optional(symbol: str) -> str | None:
     """Return the CoinMarketCap ID when configured, otherwise None."""
 
@@ -331,6 +337,16 @@ def get_cmc_id_optional(symbol: str) -> str | None:
     if normalized not in TARGET_SYMBOL_BY_KEY:
         return None
     return CMC_IDS_BY_SYMBOL.get(normalized)
+
+
+def get_cmc_id_for_mcp(symbol: str) -> str:
+    """Return the CoinMarketCap ID for MCP/x402 tool calls."""
+
+    normalized = symbol.strip().upper()
+    cmc_id = resolve_cmc_coin_id(normalized)
+    if cmc_id is None:
+        raise ValueError(f"No CoinMarketCap ID configured for MCP lookup: {normalized}")
+    return cmc_id
 
 
 def get_cmc_id(symbol: str) -> str:

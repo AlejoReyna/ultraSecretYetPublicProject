@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.config.tokens import get_cmc_id  # noqa: E402
+from src.config.tokens import get_cmc_id_for_mcp  # noqa: E402
 from src.data.x402_client import CMC_X402_ENDPOINT, DEFAULT_PAYMENT_ASSET, X402Client  # noqa: E402
 
 
@@ -70,7 +70,7 @@ def run() -> int:
         "params": {
             "name": "get_crypto_quotes_latest",
             "arguments": {
-                "id": get_cmc_id(symbol),
+                "id": get_cmc_id_for_mcp(symbol),
                 "symbol": symbol,
             },
         },

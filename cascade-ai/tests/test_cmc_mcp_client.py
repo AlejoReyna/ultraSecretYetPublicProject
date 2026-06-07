@@ -76,6 +76,10 @@ def test_cmc_mcp_uses_documented_api_key_header() -> None:
 
 
 def test_cmc_mcp_quotes_include_bnb_cmc_id() -> None:
+    from src.config.tokens import get_cmc_id_for_mcp
+
+    assert get_cmc_id_for_mcp("BNB") == "1839"
+
     fake_x402 = FakeX402Client()
     client = CMCMCPClient(Settings(use_keyless_primary=False), x402_client=fake_x402)  # type: ignore[arg-type]
 

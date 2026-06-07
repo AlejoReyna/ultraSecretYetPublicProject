@@ -12,7 +12,7 @@ import httpx
 import requests
 
 from src.config.settings import Settings
-from src.config.tokens import TARGET_SYMBOL_BY_KEY, get_cmc_id_optional
+from src.config.tokens import TARGET_SYMBOL_BY_KEY, resolve_cmc_coin_id
 from src.data.x402_client import X402Client
 from src.data.x402_payment import write_402_response
 
@@ -588,7 +588,7 @@ class CMCMCPClient:
 
     @staticmethod
     def _symbols_to_id_arg(symbols: list[str]) -> str:
-        ids = [cmc_id for symbol in symbols if (cmc_id := get_cmc_id_optional(symbol))]
+        ids = [cmc_id for symbol in symbols if (cmc_id := resolve_cmc_coin_id(symbol))]
         return ",".join(ids)
 
     @staticmethod
