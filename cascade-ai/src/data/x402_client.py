@@ -80,7 +80,7 @@ class X402Client:
             response = self._post_with_sdk(payload, merged_headers)
             if response is None:
                 return None
-            self._capture_mcp_session_id(response.headers)
+            self._capture_mcp_session_id(response.headers, response.text)
             if response.status_code < 200 or response.status_code >= 300:
                 LOGGER.warning(
                     "x402 SDK request to %s returned HTTP %s: %s",
@@ -118,7 +118,7 @@ class X402Client:
         response = self._post_with_sdk(init_payload, dict(headers))
         if response is None:
             return False
-        self._capture_mcp_session_id(response.headers)
+        self._capture_mcp_session_id(response.headers, response.text)
         if response.status_code < 200 or response.status_code >= 300:
             LOGGER.warning(
                 "CMC MCP initialize returned HTTP %s: %s",
@@ -127,10 +127,38 @@ class X402Client:
             )
             return False
         if not self._mcp_session_id:
-            LOGGER.warning("CMC MCP initialize succeeded but no Mcp-Session-Id header was returned")
+            LOGGER.warning(
+                "CMC MCP initialize succeeded but no Mcp-Session-Id was returned; body=%s",
+                _short_text(response.text),
+            )
+            return False
+        if not self._send_initialized_notification(headers):
+            LOGGER.warning("CMC MCP notifications/initialized failed")
             return False
         LOGGER.debug("CMC MCP session established")
         return True
+
+    def _send_initialized_notification(self, headers: dict[str, str]) -> bool:
+        if not self._mcp_session_id:
+            return False
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }
+        notify_headers = dict(headers)
+        notify_headers["Mcp-Session-Id"] = self._mcp_session_id
+        response = self._post_with_sdk(notification, notify_headers)
+        if response is None:
+            return False
+        if response.status_code in {200, 201, 202, 204}:
+            return True
+        LOGGER.warning(
+            "CMC MCP notifications/initialized returned HTTP %s: %s",
+            response.status_code,
+            _short_text(response.text),
+        )
+        return False
 
     def _post_with_sdk(self, payload: dict[str, Any], headers: dict[str, str]) -> Any | None:
         client = self._sdk_client or self._build_sdk_client()
@@ -142,15 +170,23 @@ class X402Client:
                 timeout=self.timeout_seconds,
             )
 
-    def _capture_mcp_session_id(self, headers: Any) -> None:
-        if headers is None:
-            return
-        getter = getattr(headers, "get", None)
-        if not callable(getter):
-            return
-        session_id = getter("mcp-session-id") or getter("Mcp-Session-Id")
-        if session_id:
-            self._mcp_session_id = str(session_id)
+    def _capture_mcp_session_id(self, headers: Any, body_text: str | None = None) -> None:
+        if headers is not None and hasattr(headers, "items"):
+            for key, value in headers.items():
+                if str(key).lower() == "mcp-session-id" and value:
+                    self._mcp_session_id = str(value)
+                    return
+        if headers is not None:
+            getter = getattr(headers, "get", None)
+            if callable(getter):
+                session_id = getter("mcp-session-id") or getter("Mcp-Session-Id")
+                if session_id:
+                    self._mcp_session_id = str(session_id)
+                    return
+        if body_text:
+            session_id = _extract_session_id_from_body(body_text)
+            if session_id:
+                self._mcp_session_id = session_id
 
     def _build_sdk_client(self) -> x402ClientSync:
         private_key = self._resolve_payment_private_key()
@@ -210,7 +246,24 @@ def _merge_mcp_headers(headers: dict[str, str]) -> dict[str, str]:
         "MCP-Protocol-Version": MCP_HTTP_PROTOCOL_VERSION,
     }
     merged.update(headers)
+    api_key = os.getenv("CMC_API_KEY", "").strip()
+    if api_key and "X-CMC-MCP-API-KEY" not in merged and "x-cmc-mcp-api-key" not in {k.lower() for k in merged}:
+        merged["X-CMC-MCP-API-KEY"] = api_key
     return merged
+
+
+def _extract_session_id_from_body(body_text: str) -> str | None:
+    payload = _parse_mcp_response(body_text)
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    for key in ("sessionId", "session_id", "mcpSessionId", "mcp_session_id"):
+        value = result.get(key)
+        if value:
+            return str(value)
+    return None
 
 
 def _network_caip2(chain_id: int, chain_name: str) -> str:
