@@ -297,9 +297,17 @@ def assert_tradable_symbol(symbol: str) -> None:
 
 
 def has_bsc_contract(symbol: str) -> bool:
-    """Return whether a verified BSC contract address is configured for a symbol."""
+    """Return whether a symbol is tradable as BEP-20 on BSC for this hackathon.
 
-    return symbol.strip().upper() in TOKEN_CONTRACTS_BSC
+    The eligible universe is BSC-native; verified addresses are listed in
+    ``TOKEN_CONTRACTS_BSC`` when known. TWAK resolves remaining hack symbols
+    by ticker on BSC (see ``resolve_twak_token``).
+    """
+
+    normalized = symbol.strip().upper()
+    if normalized in TOKEN_CONTRACTS_BSC or normalized == "BNB":
+        return True
+    return is_tradable_symbol(normalized)
 
 
 def resolve_twak_token(symbol: str) -> str:

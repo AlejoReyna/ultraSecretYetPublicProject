@@ -251,3 +251,27 @@ def test_scalping_best_near_miss_returns_scored_symbol_when_entry_threshold_not_
     assert near_miss.factor_scores
     assert (near_miss.entry_score or 0.0) < 60.0
     assert "scalping score" in near_miss.reason
+
+
+def test_scalping_best_near_miss_scores_symbols_without_bsc_contract_mapping() -> None:
+    settings = _settings(scalping_entry_score_min=60.0)
+    cache = PriceCache()
+    engine = ScalpingEngine(settings, cache)
+    near_miss = engine.best_near_miss(
+        {
+            "PENGU": {
+                "symbol": "PENGU",
+                "price": 0.05,
+                "volume_24h": 20_000_000.0,
+                "market_cap": 500_000_000.0,
+                "percent_change_1h": 0.02,
+            }
+        },
+        1_000.0,
+        _regime(),
+        _risk_decision(),
+        sentiment_result=_sentiment(gas_price_gwei=1.0),
+    )
+    assert near_miss is not None
+    assert near_miss.symbol == "PENGU"
+    assert near_miss.entry_score is not None

@@ -164,7 +164,8 @@ class ScalpingEngine:
         risk_decision: RiskDecision,
         sentiment_result: SentimentResult | None,
     ) -> EntryCandidate | None:
-        if not is_tradable_symbol(symbol) or not has_bsc_contract(symbol) or not is_liquid(data):
+        # Telemetry: score tradable hack symbols with a price. Entry keeps liquidity gates.
+        if not is_tradable_symbol(symbol):
             return None
         price = maybe_number(data.get("price"))
         if price is None or price <= 0:

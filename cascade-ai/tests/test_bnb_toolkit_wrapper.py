@@ -12,6 +12,7 @@ from src.config.tokens import (
     TARGET_SYMBOLS,
     TOKEN_CONTRACTS_BSC,
     TRADABLE_TARGET_SYMBOLS,
+    has_bsc_contract,
 )
 from src.execution import bnb_toolkit_wrapper as wrapper_module
 from src.execution.bnb_toolkit_wrapper import BnbToolkitWrapper
@@ -125,6 +126,12 @@ def test_configured_contracts_belong_to_target_universe() -> None:
     configured_in_target = {symbol for symbol in TOKEN_CONTRACTS_BSC if symbol in target_keys}
     assert configured_in_target
     assert configured_in_target <= target_keys
+
+
+def test_hackathon_tradable_symbols_count_as_bsc_even_without_static_address() -> None:
+    assert has_bsc_contract("PENGU") is True
+    assert has_bsc_contract("CAKE") is True
+    assert has_bsc_contract("USDC") is False
 
 
 def test_stables_remain_available_but_not_directionally_tradable() -> None:

@@ -1203,7 +1203,7 @@ def _telemetry_candidate_for_log(
 
     if settings.strategy_mode == "scalping" and strategy_bundle.scalping_engine is not None:
         cooldown_checker = getattr(strategy_bundle.position_manager, "is_symbol_on_cooldown", None)
-        return strategy_bundle.scalping_engine.best_near_miss(
+        near_miss = strategy_bundle.scalping_engine.best_near_miss(
             market_snapshot,
             portfolio_value,
             regime_result,
@@ -1211,6 +1211,17 @@ def _telemetry_candidate_for_log(
             sentiment_result=sentiment_result,
             exclude_symbols=exclude_symbols,
             cooldown_checker=cooldown_checker,
+        )
+        if near_miss is not None:
+            return near_miss
+        return _telemetry_candidate_from_priced_targets(
+            settings,
+            market_snapshot,
+            portfolio_value,
+            regime_result,
+            risk_decision,
+            sentiment_result,
+            strategy_bundle,
         )
 
     engine = BreakoutEngine(settings, twak_interface)
@@ -1238,6 +1249,65 @@ def _telemetry_candidate_for_log(
         risk_decision,
         settings=settings,
         exclude_symbols=exclude_symbols,
+    )
+
+
+def _telemetry_candidate_from_priced_targets(
+    settings: Settings,
+    market_snapshot: dict[str, dict[str, Any]],
+    portfolio_value: float,
+    regime_result: RegimeResult,
+    risk_decision: RiskDecision,
+    sentiment_result: SentimentResult | None,
+    strategy_bundle: Any,
+) -> EntryCandidate | None:
+    """Last-resort telemetry: score the highest-volume priced tradable symbol."""
+
+    if settings.strategy_mode != "scalping" or strategy_bundle.scalping_engine is None:
+        return None
+
+    ranked: list[tuple[float, EntryCandidate]] = []
+    for symbol in _priced_target_symbols(market_snapshot):
+        if not is_tradable_symbol(symbol):
+            continue
+        data = market_snapshot.get(symbol, {})
+        if not isinstance(data, dict):
+            continue
+        candidate = strategy_bundle.scalping_engine._score_symbol_for_telemetry(
+            symbol,
+            {"symbol": symbol, **data},
+            portfolio_value,
+            regime_result,
+            risk_decision,
+            sentiment_result,
+        )
+        if candidate is None:
+            continue
+        volume = _first_market_number(data, ("volume_24h", "market_cap"), 0.0)
+        ranked.append((volume, candidate))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    best = ranked[0][1]
+    score = best.entry_score or 0.0
+    minimum = settings.scalping_entry_score_min
+    if score >= minimum:
+        return best
+    return EntryCandidate(
+        symbol=best.symbol,
+        price=best.price,
+        position_size_usdc=0.0,
+        expected_amount_out=best.expected_amount_out,
+        slippage_small=best.slippage_small,
+        slippage_normal=best.slippage_normal,
+        reason=f"best {best.symbol} scalping score {score:.0f}/100 < {minimum:.0f}",
+        factor_scores=best.factor_scores,
+        true_factor_count=best.true_factor_count,
+        source=best.source,
+        entry_score=score,
+        strategy_mode=best.strategy_mode,
     )
 
 
@@ -1885,6 +1955,8 @@ def _log_cycle_decision(
     )
 
     factors = f"{true_factor_count}/6" if decision is not None else "-"
+    if strategy_mode == "scalping" and entry_score is not None:
+        factors = f"{int(entry_score)}/100"
     LOGGER.info(
         'Decision cycle=%s action=%s symbol=%s factors=%s slippage=%s reason="%s"',
         cycle_number,
