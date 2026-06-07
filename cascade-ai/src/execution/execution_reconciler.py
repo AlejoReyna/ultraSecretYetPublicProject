@@ -12,9 +12,12 @@ Interface contract:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+
+_TWAK_AMOUNT_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)")
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,9 @@ class ExecutionReconciler:
         balance_before: dict[str, Decimal],
     ) -> ReconciliationResult:
         """Return reconciliation status without mutating live positions."""
+
+        if _is_twak_success(tx_result):
+            return self._reconcile_twak_swap(tx_result, expected_amount_out, balance_before)
 
         receipt = tx_result.get("receipt") if isinstance(tx_result.get("receipt"), dict) else {}
         receipt_status = int(receipt.get("status", tx_result.get("status", -1)))
@@ -83,6 +89,39 @@ class ExecutionReconciler:
             block_number,
             receipt_status,
             balance_delta_confirmed,
+        )
+
+    def _reconcile_twak_swap(
+        self,
+        tx_result: dict[str, Any],
+        expected_amount_out: Decimal,
+        balance_before: dict[str, Decimal],
+    ) -> ReconciliationResult:
+        tx_hash = str(tx_result.get("hash") or tx_result.get("tx_hash") or "")
+        token_out = self._token_out(tx_result, balance_before)
+        actual = _twak_amount_out(tx_result)
+        if actual is None or actual <= 0:
+            return self._result(
+                "FAILED",
+                tx_hash,
+                token_out,
+                expected_amount_out,
+                Decimal("0"),
+                0,
+                0,
+                -1,
+                False,
+            )
+        return self._result(
+            "SUCCESS",
+            tx_hash,
+            token_out,
+            expected_amount_out,
+            actual,
+            0,
+            0,
+            1,
+            False,
         )
 
     @staticmethod
@@ -145,9 +184,11 @@ class ExecutionReconciler:
     @staticmethod
     def _amount_from_logs(tx_result: dict, receipt: dict) -> Decimal:
         for payload in (tx_result, receipt):
-            for key in ("amount_out", "amountOut", "received_amount", "to_amount"):
+            for key in ("amount_out", "amountOut", "received_amount", "to_amount", "output", "minReceived"):
                 if key in payload:
-                    return Decimal(str(payload[key]))
+                    parsed = _parse_twak_amount(payload[key])
+                    if parsed is not None:
+                        return parsed
         logs = receipt.get("logs", tx_result.get("logs", []))
         if isinstance(logs, list):
             for item in logs:
@@ -162,3 +203,36 @@ class ExecutionReconciler:
         if expected <= 0:
             return Decimal("0")
         return (expected - actual) / expected
+
+
+def _is_twak_success(tx_result: dict[str, Any]) -> bool:
+    if tx_result.get("mode") != "twak" and tx_result.get("tool") != "swap":
+        return False
+    try:
+        if int(tx_result.get("returncode", -1)) != 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return bool(tx_result.get("hash") or tx_result.get("tx_hash"))
+
+
+def _parse_twak_amount(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return Decimal(str(value))
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _TWAK_AMOUNT_RE.match(text)
+    if match is None:
+        return None
+    return Decimal(match.group(1))
+
+
+def _twak_amount_out(tx_result: dict[str, Any]) -> Decimal | None:
+    for key in ("output", "minReceived", "amount_out", "amountOut"):
+        parsed = _parse_twak_amount(tx_result.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
