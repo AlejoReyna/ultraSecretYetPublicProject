@@ -36,9 +36,10 @@ def run() -> int:
         return 2
 
     cmc_api_key = os.getenv("CMC_API_KEY", "").strip()
-    if not cmc_api_key:
-        print("x402_paid_quote_skipped=true reason=missing CMC_API_KEY in .env", file=sys.stderr)
-        return 2
+    if cmc_api_key:
+        print("cmc_api_key=optional configured", file=sys.stderr)
+    else:
+        print("cmc_api_key=optional not set; x402 USDC payment is the auth", file=sys.stderr)
 
     client = X402Client(
         endpoint=os.getenv("CMC_MCP_URL", os.getenv("CMC_X402_ENDPOINT", CMC_X402_ENDPOINT)),
@@ -55,7 +56,9 @@ def run() -> int:
             "arguments": {"symbol": "BNB", "convert": "USD"},
         },
     }
-    headers = {"MCP-Protocol-Version": "2024-11-05", "X-CMC-MCP-API-KEY": cmc_api_key}
+    headers = {"MCP-Protocol-Version": "2024-11-05"}
+    if cmc_api_key:
+        headers["X-CMC-MCP-API-KEY"] = cmc_api_key
 
     result = client.request_with_x402("POST", envelope, headers=headers)
     if result is None:

@@ -127,11 +127,12 @@ class X402Client:
             )
             return False
         if not self._mcp_session_id:
-            LOGGER.warning(
-                "CMC MCP initialize succeeded but no Mcp-Session-Id was returned; body=%s",
+            LOGGER.info(
+                "CMC MCP initialize returned no session id; continuing with x402 payment-only flow "
+                "(body=%s)",
                 _short_text(response.text),
             )
-            return False
+            return True
         if not self._send_initialized_notification(headers):
             LOGGER.warning("CMC MCP notifications/initialized failed")
             return False
@@ -246,6 +247,8 @@ def _merge_mcp_headers(headers: dict[str, str]) -> dict[str, str]:
         "MCP-Protocol-Version": MCP_HTTP_PROTOCOL_VERSION,
     }
     merged.update(headers)
+    # CMC_API_KEY is optional on /x402/mcp — micropayment replaces API-key auth there.
+    # Include it only when configured (Keyless REST / optional MCP deployments).
     api_key = os.getenv("CMC_API_KEY", "").strip()
     if api_key and "X-CMC-MCP-API-KEY" not in merged and "x-cmc-mcp-api-key" not in {k.lower() for k in merged}:
         merged["X-CMC-MCP-API-KEY"] = api_key

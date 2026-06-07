@@ -77,6 +77,32 @@ def test_request_with_x402_initializes_mcp_session_before_tools_call() -> None:
     assert post.call_args_list[2][0][1]["Mcp-Session-Id"] == "session-abc"
 
 
+def test_request_with_x402_continues_without_session_when_initialize_has_no_session_id() -> None:
+    client = X402Client(endpoint=ENDPOINT, payment_private_key=TEST_PRIVATE_KEY, sdk_client=FakeSdkClient())
+    init_response = MagicMock()
+    init_response.status_code = 200
+    init_response.text = '{"jsonrpc":"2.0","result":{"protocolVersion":"2025-03-26"}}'
+    init_response.headers = {}
+
+    tool_response = MagicMock()
+    tool_response.status_code = 200
+    tool_response.text = '{"jsonrpc":"2.0","result":{"content":[]}}'
+    tool_response.headers = {}
+
+    with patch.object(client, "_post_with_sdk", side_effect=[init_response, tool_response]) as post:
+        payload = client.request_with_x402(
+            "POST",
+            {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_crypto_quotes_latest"}},
+            {},
+        )
+
+    assert payload == {"jsonrpc": "2.0", "result": {"content": []}}
+    assert post.call_count == 2
+    assert post.call_args_list[0][0][0]["method"] == "initialize"
+    assert post.call_args_list[1][0][0]["method"] == "tools/call"
+    assert "Mcp-Session-Id" not in post.call_args_list[1][0][1]
+
+
 def test_request_with_x402_returns_none_when_payment_fails() -> None:
     from x402.http.clients.requests import PaymentError
 
