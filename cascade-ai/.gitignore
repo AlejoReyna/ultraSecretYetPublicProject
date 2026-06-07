@@ -11,6 +11,7 @@ build/
 .coverage
 htmlcov/
 positions.json
+guardrail_state.json
 artifacts/*
 !artifacts/.gitkeep
 test_agentkit.py
