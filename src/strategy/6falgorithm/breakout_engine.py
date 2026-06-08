@@ -6,11 +6,14 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.config.settings import Settings
 from src.config.tokens import is_liquid, is_tradable_symbol
 from src.execution.twak_interface import TWAKInterface
+
+if TYPE_CHECKING:
+    from src.ml.types import MLContext
 
 CORE_FACTOR_COUNT = 4
 TOTAL_FACTOR_COUNT = 6
@@ -27,6 +30,7 @@ class BreakoutDecision:
     true_factor_count: int
     reason: str
     estimated_slippage_pct: float | None = None
+    ml_context: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,12 @@ class BreakoutEngine:
         self.price_cache = LocalCache("price_cache.json")
         self.volume_cache = LocalCache("volume_cache.json")
 
-    def evaluate_token(self, token_data: dict[str, Any], portfolio_value_usdc: float) -> BreakoutDecision:
+    def evaluate_token(
+        self,
+        token_data: dict[str, Any],
+        portfolio_value_usdc: float,
+        ml_context: Any | None = None,
+    ) -> BreakoutDecision:
         """Evaluate one token against the entry filter."""
 
         symbol = str(token_data.get("symbol", "")).upper()
@@ -144,7 +153,8 @@ class BreakoutEngine:
         estimated_slippage: float | None = None
         if candidate.cheap_core_pass_count >= self._min_cheap_core_for_slippage_quote:
             estimated_slippage = self._estimate_candidate_slippage(candidate)
-        return self._decision_from_candidate(candidate, estimated_slippage)
+        decision = self._decision_from_candidate(candidate, estimated_slippage)
+        return self._attach_ml_context(decision, {symbol: ml_context} if ml_context else None)
 
     def _evaluate_cheap_candidate(
         self,
@@ -273,12 +283,30 @@ class BreakoutEngine:
             estimated_slippage_pct=estimated_slippage,
         )
 
-    def evaluate_universe(
+    def _attach_ml_context(self, decision: BreakoutDecision, ml_contexts: dict[str, Any] | None) -> BreakoutDecision:
+        if not ml_contexts or decision.symbol is None:
+            return decision
+        ctx = ml_contexts.get(decision.symbol.upper())
+        if ctx is None:
+            return decision
+        return BreakoutDecision(
+            should_enter=decision.should_enter,
+            symbol=decision.symbol,
+            position_size_usdc=decision.position_size_usdc,
+            factor_scores=decision.factor_scores,
+            true_factor_count=decision.true_factor_count,
+            reason=decision.reason,
+            estimated_slippage_pct=decision.estimated_slippage_pct,
+            ml_context=ctx,
+        )
+
+    def evaluate_all(
         self,
         market_snapshot: dict[str, dict[str, Any]],
         portfolio_value_usdc: float,
-    ) -> BreakoutDecision:
-        """Scan target symbols and pick the highest-scoring candidate."""
+        ml_contexts: dict[str, Any] | None = None,
+    ) -> list[BreakoutDecision]:
+        """Scan target symbols and return all slippage-confirmed entry decisions."""
 
         candidates: list[_CheapCandidate] = []
         best_decision: BreakoutDecision | None = None
@@ -309,15 +337,15 @@ class BreakoutEngine:
             reverse=True,
         )
 
+        passers: list[BreakoutDecision] = []
         for candidate in quote_candidates[:MAX_UNIVERSE_TWAK_QUOTES]:
             decision = self._decision_from_candidate(
                 candidate,
                 self._estimate_candidate_slippage(candidate),
             )
+            decision = self._attach_ml_context(decision, ml_contexts)
             if decision.should_enter:
-                self.price_cache.save()
-                self.volume_cache.save()
-                return decision
+                passers.append(decision)
             if self._is_better_decision(decision, candidate.volume_24h, best_decision, best_volume):
                 best_decision = decision
                 best_volume = candidate.volume_24h
@@ -325,16 +353,35 @@ class BreakoutEngine:
         self.price_cache.save()
         self.volume_cache.save()
 
+        if passers:
+            return passers
+
         if best_decision is None:
-            return BreakoutDecision(
-                should_enter=False,
-                symbol=None,
-                position_size_usdc=0.0,
-                factor_scores={},
-                true_factor_count=0,
-                reason="no liquid target symbols available" if saw_target_symbol else "no target symbols available",
-            )
-        return best_decision
+            return [
+                BreakoutDecision(
+                    should_enter=False,
+                    symbol=None,
+                    position_size_usdc=0.0,
+                    factor_scores={},
+                    true_factor_count=0,
+                    reason="no liquid target symbols available" if saw_target_symbol else "no target symbols available",
+                )
+            ]
+        return [self._attach_ml_context(best_decision, ml_contexts)]
+
+    def evaluate_universe(
+        self,
+        market_snapshot: dict[str, dict[str, Any]],
+        portfolio_value_usdc: float,
+        ml_contexts: dict[str, Any] | None = None,
+    ) -> BreakoutDecision:
+        """Scan target symbols and pick the highest-scoring candidate."""
+
+        decisions = self.evaluate_all(market_snapshot, portfolio_value_usdc, ml_contexts)
+        passers = [decision for decision in decisions if decision.should_enter]
+        if passers:
+            return passers[0]
+        return decisions[0]
 
     _min_cheap_core_for_slippage_quote = 2
 
@@ -349,14 +396,16 @@ class BreakoutEngine:
         rolling_hourly_avg = self._positive_number(token_data.get("rolling_24h_hourly_volume_avg"))
         if rolling_hourly_avg is None and volume_1h is not None and volume_24h is not None:
             rolling_hourly_avg = volume_24h / 24.0
+        breakout_mult = self.settings.ml_volume_breakout_multiplier
+        cache_mult = self.settings.ml_volume_cache_multiplier
         if volume_1h is not None and rolling_hourly_avg is not None and rolling_hourly_avg > 0:
-            return volume_1h > 2.0 * rolling_hourly_avg
+            return volume_1h > breakout_mult * rolling_hourly_avg
 
         if volume_24h is not None:
             self.volume_cache.add_data_point(symbol, volume_24h, max_age_hours=24)
             avg_vol = self.volume_cache.get_average_value(symbol)
             if avg_vol is not None and avg_vol > 0:
-                return volume_24h > 1.2 * avg_vol
+                return volume_24h > cache_mult * avg_vol
             if market_cap is not None:
                 return volume_24h > 0.05 * market_cap
         return False

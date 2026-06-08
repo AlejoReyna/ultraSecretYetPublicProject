@@ -60,6 +60,9 @@ def breakout_decision_to_candidate(
         position_size = portfolio_value * settings.max_position_pct * risk_decision.position_multiplier
     if for_telemetry and not decision.should_enter:
         position_size = 0.0
+    ml_context = getattr(decision, "ml_context", None)
+    if ml_context is not None and position_size > 0:
+        position_size *= float(getattr(ml_context, "position_size_multiplier", 1.0))
     slippage_normal = decision.estimated_slippage_pct
     slippage_small = maybe_number(token_data.get("estimated_slippage_small_pct"))
     if slippage_small is None and slippage_normal is not None:
@@ -76,6 +79,7 @@ def breakout_decision_to_candidate(
         true_factor_count=decision.true_factor_count,
         source="breakout_engine",
         strategy_mode="breakout",
+        ml_context=ml_context,
     )
 
 

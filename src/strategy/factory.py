@@ -93,6 +93,7 @@ def create_strategy_bundle(
         settings: Settings | None = None,
         twak_interface: TWAKInterface | None = None,
         exclude_symbols: set[str] | None = None,
+        ml_bundle: Any | None = None,
         **_: Any,
     ) -> Any:
         active_settings = settings or guardrails.settings
@@ -104,7 +105,8 @@ def create_strategy_bundle(
             settings=active_settings,
             twak_interface=twak_interface,
             exclude_symbols=exclude_symbols,
-            use_breakout_engine=False,
+            use_breakout_engine=True,
+            ml_bundle=ml_bundle,
         )
 
     return StrategyBundle(

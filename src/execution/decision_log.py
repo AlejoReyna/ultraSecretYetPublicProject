@@ -38,6 +38,13 @@ class DecisionLogger:
         entry_score: float | None = None,
         exit_reason: str | None = None,
         hold_time_seconds: int | None = None,
+        ml_regime: str | None = None,
+        ml_confidence: float | None = None,
+        ml_ranking: dict[str, Any] | None = None,
+        ml_active: bool | None = None,
+        ml_selected_symbol: str | None = None,
+        executed_symbol: str | None = None,
+        ml_scores: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Append one strategy decision record and return it."""
 
@@ -65,6 +72,20 @@ class DecisionLogger:
             record["exit_reason"] = exit_reason
         if hold_time_seconds is not None:
             record["hold_time_seconds"] = hold_time_seconds
+        if ml_regime is not None:
+            record["ml_regime"] = ml_regime
+        if ml_confidence is not None:
+            record["ml_confidence"] = ml_confidence
+        if ml_ranking is not None:
+            record["ml_ranking"] = ml_ranking
+        if ml_active is not None:
+            record["ml_active"] = ml_active
+        if ml_selected_symbol is not None:
+            record["ml_selected_symbol"] = ml_selected_symbol
+        if executed_symbol is not None:
+            record["executed_symbol"] = executed_symbol
+        if ml_scores is not None:
+            record["ml_scores"] = ml_scores
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
@@ -92,6 +113,13 @@ def log_decision(
     entry_score: float | None = None,
     exit_reason: str | None = None,
     hold_time_seconds: int | None = None,
+    ml_regime: str | None = None,
+    ml_confidence: float | None = None,
+    ml_ranking: dict[str, Any] | None = None,
+    ml_active: bool | None = None,
+    ml_selected_symbol: str | None = None,
+    executed_symbol: str | None = None,
+    ml_scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Append a strategy decision record using the configured settings path."""
 
@@ -114,4 +142,11 @@ def log_decision(
         entry_score=entry_score,
         exit_reason=exit_reason,
         hold_time_seconds=hold_time_seconds,
+        ml_regime=ml_regime,
+        ml_confidence=ml_confidence,
+        ml_ranking=ml_ranking,
+        ml_active=ml_active,
+        ml_selected_symbol=ml_selected_symbol,
+        executed_symbol=executed_symbol,
+        ml_scores=ml_scores,
     )

@@ -1,0 +1,9 @@
+{
+  "version": "regime_lgbm_v1",
+  "trained_at": "2026-06-08T16:34:20.136854+00:00",
+  "metrics": {
+    "test_auc": 0.5623031271577513,
+    "precision_at_threshold": 0.2927230046948357
+  },
+  "feature_count": 30
+}

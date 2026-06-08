@@ -1,0 +1,21 @@
+[Unit]
+Description=Plan B+ autonomous BSC trading agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/planb-plus
+EnvironmentFile=/home/ubuntu/planb-plus/.env
+ExecStartPre=/home/ubuntu/planb-plus/.venv/bin/python /home/ubuntu/planb-plus/scripts/verify_twak_unlock.py
+ExecStart=/home/ubuntu/planb-plus/.venv/bin/python -m src.main --live
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=planb-plus
+
+[Install]
+WantedBy=default.target

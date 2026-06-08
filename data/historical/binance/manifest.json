@@ -1,0 +1,86 @@
+{
+  "fetched_at": "2026-06-08T16:31:43.099905+00:00",
+  "symbols": {
+    "CAKE": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_CAKE.parquet"
+    },
+    "ETH": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_ETH.parquet"
+    },
+    "BNB": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_BNB.parquet"
+    },
+    "LINK": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_LINK.parquet"
+    },
+    "DOGE": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_DOGE.parquet"
+    },
+    "SHIB": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_SHIB.parquet"
+    },
+    "FLOKI": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_FLOKI.parquet"
+    },
+    "ADA": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_ADA.parquet"
+    },
+    "XRP": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_XRP.parquet"
+    },
+    "DOT": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_DOT.parquet"
+    },
+    "AVAX": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_AVAX.parquet"
+    },
+    "ATOM": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_ATOM.parquet"
+    },
+    "UNI": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_UNI.parquet"
+    },
+    "AAVE": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_AAVE.parquet"
+    },
+    "INJ": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_INJ.parquet"
+    },
+    "FIL": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_FIL.parquet"
+    },
+    "LTC": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_LTC.parquet"
+    },
+    "TRX": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_TRX.parquet"
+    },
+    "BONK": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_BONK.parquet"
+    },
+    "TON": {
+      "rows": 2880,
+      "path": "data/historical/binance/ohlcv_15m_TON.parquet"
+    }
+  },
+  "cmc_rows": 0
+}

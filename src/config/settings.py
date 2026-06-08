@@ -8,6 +8,8 @@ from typing import Any, Literal, Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+from src.ml.constants import ML_DEFAULT_20
+
 
 class Settings(BaseModel):
     """Runtime settings for the trading agent."""
@@ -94,6 +96,28 @@ class Settings(BaseModel):
     scalping_min_market_cap_usd: float = 1_000_000.0
     scalping_consecutive_loss_limit: int = 3
     scalping_consecutive_loss_cooldown_hours: float = 1.0
+    ml_enabled: bool = False
+    ml_model_path: str = "models/regime_lgbm_v1.pkl"
+    ml_regime_threshold: float = 0.55
+    ml_momentum_size_multiplier: float = 1.0
+    ml_chop_size_multiplier: float = 0.5
+    ml_universe_symbols: list[str] = Field(default_factory=lambda: list(ML_DEFAULT_20))
+    ml_ohlcv_cache_db: str = "data/ml_ohlcv_cache.sqlite"
+    ml_ohlcv_lookback_candles: int = 96
+    ml_volume_breakout_multiplier: float = 2.0
+    ml_volume_cache_multiplier: float = 1.2
+    ml_min_auc: float = 0.65
+    ml_shadow_mode: bool = True
+    ml_regime_only_chop_multiplier: float = 0.3
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    health_check_port: int = 8080
+    log_rotate_max_mb: float = 50.0
+    cmc_collector_enabled: bool = True
+    cmc_collector_interval_min: int = 15
+    min_bnb_gas: float = 0.05
+    min_usdc_balance: float = 50.0
+    disk_guard_min_free_bytes: int = 500_000_000
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -121,6 +145,13 @@ def _none_if_blank(value: str | None) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value
+
+
+def _get_symbol_list(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return list(default)
+    return [item.strip().upper() for item in value.split(",") if item.strip()]
 
 
 def load_settings(dotenv_path: str | None = None) -> Settings:
@@ -235,6 +266,28 @@ def load_settings(dotenv_path: str | None = None) -> Settings:
         "scalping_min_market_cap_usd": _get_float("SCALPING_MIN_MARKET_CAP_USD", 1_000_000.0),
         "scalping_consecutive_loss_limit": _get_int("SCALPING_CONSECUTIVE_LOSS_LIMIT", 3),
         "scalping_consecutive_loss_cooldown_hours": _get_float("SCALPING_CONSECUTIVE_LOSS_COOLDOWN_HOURS", 1.0),
+        "ml_enabled": _get_bool("ML_ENABLED", False),
+        "ml_model_path": os.getenv("ML_MODEL_PATH", "models/regime_lgbm_v1.pkl"),
+        "ml_regime_threshold": _get_float("ML_REGIME_THRESHOLD", 0.55),
+        "ml_momentum_size_multiplier": _get_float("ML_MOMENTUM_SIZE_MULTIPLIER", 1.0),
+        "ml_chop_size_multiplier": _get_float("ML_CHOP_SIZE_MULTIPLIER", 0.5),
+        "ml_universe_symbols": _get_symbol_list("ML_UNIVERSE_SYMBOLS", ML_DEFAULT_20),
+        "ml_ohlcv_cache_db": os.getenv("ML_OHLCV_CACHE_DB", "data/ml_ohlcv_cache.sqlite"),
+        "ml_ohlcv_lookback_candles": _get_int("ML_OHLCV_LOOKBACK_CANDLES", 96),
+        "ml_volume_breakout_multiplier": _get_float("ML_VOLUME_BREAKOUT_MULTIPLIER", 2.0),
+        "ml_volume_cache_multiplier": _get_float("ML_VOLUME_CACHE_MULTIPLIER", 1.2),
+        "ml_min_auc": _get_float("ML_MIN_AUC", 0.65),
+        "ml_shadow_mode": _get_bool("ML_SHADOW_MODE", True),
+        "ml_regime_only_chop_multiplier": _get_float("ML_REGIME_ONLY_CHOP_MULTIPLIER", 0.3),
+        "telegram_bot_token": _none_if_blank(os.getenv("TELEGRAM_BOT_TOKEN")),
+        "telegram_chat_id": _none_if_blank(os.getenv("TELEGRAM_CHAT_ID")),
+        "health_check_port": _get_int("HEALTH_CHECK_PORT", 8080),
+        "log_rotate_max_mb": _get_float("LOG_ROTATE_MAX_MB", 50.0),
+        "cmc_collector_enabled": _get_bool("CMC_COLLECTOR_ENABLED", True),
+        "cmc_collector_interval_min": _get_int("CMC_COLLECTOR_INTERVAL_MIN", 15),
+        "min_bnb_gas": _get_float("MIN_BNB_GAS", 0.05),
+        "min_usdc_balance": _get_float("MIN_USDC_BALANCE", 50.0),
+        "disk_guard_min_free_bytes": _get_int("DISK_GUARD_MIN_FREE_BYTES", 500_000_000),
     }
     mode = str(values.get("strategy_mode", "breakout")).strip().lower()
     if mode not in {"breakout", "scalping"}:

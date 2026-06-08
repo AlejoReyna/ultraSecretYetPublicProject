@@ -24,6 +24,7 @@ from src.common.logging_schema import (
     append_to_file,
 )
 from src.config.settings import Settings, load_settings
+from src.deployment.runtime import deployment_startup, disk_allows_entries, update_health_snapshot
 from src.config.tokens import (
     TARGET_SYMBOLS,
     TRADABLE_TARGET_SYMBOLS,
@@ -381,11 +382,31 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
     position_manager = strategy_bundle.position_manager
     guardrails = strategy_bundle.guardrails
     scoring.evaluate_universe = strategy_bundle.evaluate_universe
+    ml_bundle: Any | None = None
+    if settings.ml_enabled:
+        try:
+            from src.ml.bundle import MLBundle
+
+            ml_bundle = MLBundle.from_settings(settings)
+            LOGGER.info("ML bundle loaded from %s", settings.ml_model_path)
+        except Exception as exc:
+            LOGGER.warning("ML bundle disabled due to load failure: %s", exc)
+            ml_bundle = None
     shadow_logger = _build_shadow_logger(price_cache, settings)
     positions_loaded = position_manager.load_positions()
     needs_balance_reconstruction = not positions_loaded and not settings.paper_trade
     if positions_loaded:
         LOGGER.info("Loaded %s persisted open positions", len(position_manager.list_open_positions()))
+
+    health_state, _health_server, pending_swap_cooldowns = deployment_startup(
+        settings,
+        position_manager=position_manager,
+        toolkit=toolkit,
+        ml_bundle=ml_bundle,
+    )
+    if pending_swap_cooldowns:
+        LOGGER.warning("Pending swap cooldown symbols: %s", sorted(pending_swap_cooldowns))
+
     running = True
     cycles_completed = 0
     previous_risk_state: RiskState | None = None
@@ -427,7 +448,11 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
         action = "WAIT"
         entry_position_pct = 0.0
         entries_allowed = _risk_allows_new_entries(guardrails, risk_decision, portfolio_value, settings)
-        decision_reasons = list(risk_decision.reasons)
+        decision_reasons_pre: list[str] = []
+        if entries_allowed and not disk_allows_entries(settings):
+            entries_allowed = False
+            decision_reasons_pre.append("disk guard: free space below threshold")
+        decision_reasons = list(risk_decision.reasons) + decision_reasons_pre
         cycle_status = "ok"
 
         if risk_decision.state == RiskState.KILL_SWITCH:
@@ -506,6 +531,13 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             if skip_entries:
                 decision_reasons.append("Scalping mode: monitoring open position")
             else:
+                if ml_bundle is not None:
+                    try:
+                        ml_bundle.refresh_ohlcv_if_stale()
+                    except Exception as exc:
+                        LOGGER.warning("ML OHLCV refresh failed: %s", exc)
+                exclude_symbols = {position.symbol for position in position_manager.list_open_positions()}
+                exclude_symbols.update(pending_swap_cooldowns)
                 candidate = _evaluate_universe_v25(
                     market_snapshot,
                     portfolio_value,
@@ -513,8 +545,9 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     risk_decision,
                     settings,
                     twak_interface,
-                    exclude_symbols={position.symbol for position in position_manager.list_open_positions()},
+                    exclude_symbols=exclude_symbols,
                     sentiment_result=sentiment_result,
+                    ml_bundle=ml_bundle,
                 )
                 if candidate is None and settings.strategy_mode != "scalping":
                     minimum_trade = check_daily_minimum_compliance(
@@ -628,6 +661,13 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                 LOGGER.warning("Shadow logging failed: %s", exc)
 
         _log_live_window_warning(guardrails)
+        update_health_snapshot(
+            health_state,
+            guardrails=guardrails,
+            portfolio_value=portfolio_value,
+            position_manager=position_manager,
+            ml_bundle=ml_bundle,
+        )
         cycles_completed += 1
         if max_cycles is not None and cycles_completed >= max_cycles:
             LOGGER.info("Completed %s cycle(s); exiting", cycles_completed)
@@ -787,6 +827,7 @@ def _evaluate_universe_v25(
     twak_interface: TWAKInterface | None = None,
     exclude_symbols: set[str] | None = None,
     sentiment_result: SentimentResult | None = None,
+    ml_bundle: Any | None = None,
 ) -> EntryCandidate | None:
     evaluate = getattr(scoring, "evaluate_universe", None)
     if evaluate is not None and evaluate is not fallback_evaluate_universe:
@@ -800,6 +841,7 @@ def _evaluate_universe_v25(
                 twak_interface=twak_interface,
                 exclude_symbols=exclude_symbols or set(),
                 sentiment_result=sentiment_result,
+                ml_bundle=ml_bundle,
             )
         except TypeError:
             try:
@@ -811,9 +853,21 @@ def _evaluate_universe_v25(
                     settings=settings,
                     twak_interface=twak_interface,
                     exclude_symbols=exclude_symbols or set(),
+                    ml_bundle=ml_bundle,
                 )
             except TypeError:
-                candidate = evaluate(snapshot, portfolio_value, regime_result, risk_decision)
+                try:
+                    candidate = evaluate(
+                        snapshot,
+                        portfolio_value,
+                        regime_result,
+                        risk_decision,
+                        settings=settings,
+                        twak_interface=twak_interface,
+                        exclude_symbols=exclude_symbols or set(),
+                    )
+                except TypeError:
+                    candidate = evaluate(snapshot, portfolio_value, regime_result, risk_decision)
         return coerce_entry_candidate(candidate, portfolio_value, settings, risk_decision)
     return fallback_evaluate_universe(
         snapshot,
@@ -925,10 +979,13 @@ def _attempt_entry_v25(
         position_usd = candidate.position_size_usdc
         position_pct = position_usd / portfolio_value if portfolio_value > 0 else 0.0
     else:
+        ml_multiplier = 1.0
+        if getattr(candidate, "ml_context", None) is not None:
+            ml_multiplier = float(getattr(candidate.ml_context, "position_size_multiplier", 1.0))
         position_pct = calculate_position_pct(
             equity_usd=portfolio_value,
             atr_pct=atr_pct,
-            regime_multiplier=regime_result.position_multiplier,
+            regime_multiplier=regime_result.position_multiplier * ml_multiplier,
             risk_state_multiplier=risk_decision.position_multiplier,
             loss_streak=int(getattr(guardrails, "_loss_streak", 0)),
             max_position_pct=settings.max_position_pct,
@@ -1065,6 +1122,29 @@ def _compute_expected_breakeven_pct(
         return None
 
 
+def _ml_fields_from_candidate(candidate: EntryCandidate | None) -> dict[str, Any]:
+    if candidate is None:
+        return {}
+    fields: dict[str, Any] = {}
+    ctx = getattr(candidate, "ml_context", None)
+    if ctx is not None:
+        fields["ml_regime"] = getattr(ctx, "regime", None)
+        fields["ml_confidence"] = getattr(ctx, "confidence", None)
+    ml_ranking = getattr(candidate, "ml_ranking", None)
+    if ml_ranking is not None:
+        fields["ml_ranking"] = ml_ranking
+        if isinstance(ml_ranking, dict):
+            if "ml_active" in ml_ranking:
+                fields["ml_active"] = ml_ranking.get("ml_active")
+            if "ml_selected_symbol" in ml_ranking:
+                fields["ml_selected_symbol"] = ml_ranking.get("ml_selected_symbol")
+            if "executed_symbol" in ml_ranking:
+                fields["executed_symbol"] = ml_ranking.get("executed_symbol")
+            if "ml_scores" in ml_ranking:
+                fields["ml_scores"] = ml_ranking.get("ml_scores")
+    return fields
+
+
 def _write_v25_cycle_logs(
     settings: Settings,
     run_id: str,
@@ -1100,6 +1180,7 @@ def _write_v25_cycle_logs(
         bnb_price_usd=bnb_price_usd,
         position_size_usd=position_size_usd if position_size_usd > 0 else portfolio_value,
     )
+    ml_fields = _ml_fields_from_candidate(candidate)
     append_to_file(
         "logs/decision_live.jsonl",
         LiveDecisionLog(
@@ -1129,6 +1210,9 @@ def _write_v25_cycle_logs(
             hold_time_seconds=exit_meta.get("hold_time_seconds") if exit_meta else None,
             exit_reason=exit_meta.get("exit_reason") if exit_meta else None,
             expected_breakeven_pct=expected_breakeven_pct,
+            ml_regime=ml_fields.get("ml_regime"),
+            ml_confidence=ml_fields.get("ml_confidence"),
+            ml_ranking=ml_fields.get("ml_ranking"),
         ),
     )
     if exit_meta is not None:
@@ -1351,6 +1435,13 @@ def _log_legacy_cycle_from_v25(
         entry_score=candidate.entry_score if candidate else None,
         exit_reason=exit_meta.get("exit_reason") if exit_meta else None,
         hold_time_seconds=exit_meta.get("hold_time_seconds") if exit_meta else None,
+        ml_regime=_ml_fields_from_candidate(candidate).get("ml_regime"),
+        ml_confidence=_ml_fields_from_candidate(candidate).get("ml_confidence"),
+        ml_ranking=_ml_fields_from_candidate(candidate).get("ml_ranking"),
+        ml_active=_ml_fields_from_candidate(candidate).get("ml_active"),
+        ml_selected_symbol=_ml_fields_from_candidate(candidate).get("ml_selected_symbol"),
+        executed_symbol=_ml_fields_from_candidate(candidate).get("executed_symbol"),
+        ml_scores=_ml_fields_from_candidate(candidate).get("ml_scores"),
     )
 
 
@@ -1928,6 +2019,13 @@ def _log_cycle_decision(
     entry_score: float | None = None,
     exit_reason: str | None = None,
     hold_time_seconds: int | None = None,
+    ml_regime: str | None = None,
+    ml_confidence: float | None = None,
+    ml_ranking: dict[str, Any] | None = None,
+    ml_active: bool | None = None,
+    ml_selected_symbol: str | None = None,
+    executed_symbol: str | None = None,
+    ml_scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Persist and print the operator-facing decision for one cycle."""
 
@@ -1972,6 +2070,13 @@ def _log_cycle_decision(
         entry_score=entry_score,
         exit_reason=exit_reason,
         hold_time_seconds=hold_time_seconds,
+        ml_regime=ml_regime,
+        ml_confidence=ml_confidence,
+        ml_ranking=ml_ranking,
+        ml_active=ml_active,
+        ml_selected_symbol=ml_selected_symbol,
+        executed_symbol=executed_symbol,
+        ml_scores=ml_scores,
     )
 
     factors = f"{true_factor_count}/6" if decision is not None else "-"

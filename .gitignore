@@ -17,3 +17,6 @@ artifacts/*
 test_agentkit.py
 test_x402_raw.py
 context.md
+data/historical/**/*.parquet
+data/ml_ohlcv_cache.sqlite
+models/*.pkl

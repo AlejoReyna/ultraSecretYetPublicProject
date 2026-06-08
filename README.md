@@ -18,9 +18,9 @@
 
 <br/>
 
-[Quick Start](#-quick-start) · [Run Modes](#-run-modes) · [Strategy](#-strategy-modes) · [Architecture](#-architecture) · [Logs](#-logs--telemetry)
-
 </div>
+
+[Quick Start](#quick-start) · [Run Modes](#run-modes) · [Strategy](#strategy-modes) · [Architecture](#architecture) · [Logs](#logs--telemetry)
 
 ---
 
@@ -30,7 +30,7 @@
 
 | Design principle | What it means |
 | --- | --- |
-| **No ML pipeline** | Deterministic, auditable factor scoring — no black-box inference |
+| **ML is additive only** | LightGBM regime detection and ranking augment the 4-factor gate — never replace it |
 | **No custom execution server** | All writes go through verified TWAK CLI subprocesses |
 | **Fail-closed risk** | Slippage, drawdown, and daily limits block entries before capital moves |
 | **Append-only audit trail** | Every cycle and swap is logged to JSONL for replay and demo proof |
@@ -87,6 +87,8 @@ Each trading cycle (every `LOOP_SECONDS`, default **5 minutes**):
 
 ---
 
+<a id="architecture"></a>
+
 ## Architecture
 
 ```mermaid
@@ -133,9 +135,66 @@ flowchart TB
 | `src/strategy/` | Breakout & scalping engines, regime, sentiment, guardrails |
 | `src/execution/` | TWAK subprocess wrapper, swap routing, on-chain reconciliation |
 | `src/config/` | Settings, token allowlists, env-only secrets |
-| `scripts/` | Smoke tests, shadow replay, emergency shell helpers |
+| `src/ml/` | Feature pipeline, LightGBM regime predictor, candidate ranking (opt-in) |
+| `scripts/` | Smoke tests, shadow replay, ML training/hyperopt, emergency shell helpers |
 
 ---
+
+## ML augmentation layer (Plan B+)
+
+Opt-in via `ML_ENABLED=true`. The 4 core breakout factors remain the **mandatory gate**; ML only adds regime context, position sizing, and candidate ranking when multiple tokens pass.
+
+```mermaid
+flowchart LR
+    subgraph offline [Offline]
+        Fetch[fetch_historical_data.py] --> Matrix[build_feature_matrix.py]
+        Matrix --> Train[train_regime_model.py]
+        Train --> Model[models/regime_lgbm_v1.pkl]
+    end
+    subgraph live [Live loop]
+        Model --> Bundle[MLBundle]
+        Bundle --> Engine[BreakoutEngine]
+        Engine --> Rank[CandidateRanker]
+    end
+```
+
+### Activation
+
+```bash
+pip install -r requirements-ml.txt
+python scripts/fetch_historical_data.py      # Binance OHLCV + CMC premium snapshots
+# Use --binance-only when x402/CMC deps are unavailable (OHLCV-only training)
+python scripts/build_feature_matrix.py
+python scripts/train_regime_model.py         # purged CV + 3-model comparison
+python scripts/smoke_ml_inference.py         # verify <5ms inference latency
+```
+
+Review `MODEL_QUALITY_REPORT.md` after training. **ML ranking stays disabled** until worst-fold AUC ≥ `ML_MIN_AUC` (default 0.65) and you set `ML_SHADOW_MODE=false`.
+
+Then in `.env`:
+
+```
+ML_ENABLED=true
+ML_SHADOW_MODE=true
+ML_MIN_AUC=0.65
+STRATEGY_MODE=breakout
+```
+
+### What ML does (and does not do)
+
+| Capability | Behavior |
+| --- | --- |
+| Regime detection | LightGBM binary classifier: momentum vs chop from 30 features (Binance OHLCV + CMC premium) |
+| Position sizing | `1.0×` in momentum regime, `0.5×` in chop (configurable) |
+| Candidate ranking | When 2+ tokens pass core factors, pick highest ML confidence |
+| Hyperopt | `scripts/optimize_params.py` replays decision/execution logs with Optuna |
+| **Cannot bypass** | Core factors, slippage cap, daily trade limits, drawdown kill switch |
+
+Key env vars: `ML_REGIME_THRESHOLD`, `ML_MOMENTUM_SIZE_MULTIPLIER`, `ML_CHOP_SIZE_MULTIPLIER`, `ML_VOLUME_BREAKOUT_MULTIPLIER`, `ML_VOLUME_CACHE_MULTIPLIER`.
+
+---
+
+<a id="strategy-modes"></a>
 
 ## Strategy modes
 
@@ -204,6 +263,8 @@ Stables (USDC / USDT) are settlement tokens — not directional entry targets.
 
 ---
 
+<a id="quick-start"></a>
+
 ## Quick start
 
 ```bash
@@ -240,6 +301,8 @@ pytest
 ```
 
 ---
+
+<a id="run-modes"></a>
 
 ## Run modes
 
@@ -304,6 +367,8 @@ python scripts/replay_shadow.py
 ```
 
 ---
+
+<a id="logs--telemetry"></a>
 
 ## Logs & telemetry
 
