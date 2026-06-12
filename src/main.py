@@ -450,6 +450,16 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
     if positions_loaded:
         LOGGER.info("Loaded %s persisted open positions", len(position_manager.list_open_positions()))
 
+    # Re-log the snapshot-cache restore here: the singleton loads at import
+    # time, before logging is configured, so its own INFO line is dropped.
+    if settings.use_dual_market_data and not settings.use_keyless_primary:
+        restored_age = get_dual_market_snapshot_cache().x402_age_seconds()
+        if restored_age is not None:
+            LOGGER.info(
+                "Restored persisted x402 snapshot at startup (age=%.0fs); no paid refresh until TTL expires",
+                restored_age,
+            )
+
     health_state, _health_server, pending_swap_cooldowns = deployment_startup(
         settings,
         position_manager=position_manager,
@@ -1732,7 +1742,12 @@ def _ensure_bnb_reference(snapshot: dict[str, dict[str, Any]], cmc_client: CMCMC
         snapshot["BNB"] = {"symbol": "BNB", **snapshot["WBNB"]}
         return
     try:
-        payload = cmc_client.get_crypto_quotes_latest(["BNB"])
+        # Keyless on purpose: this runs every cycle and BNB is only a regime
+        # reference. get_crypto_quotes_latest would route through PAID x402
+        # when keyless-primary is off ($0.01/cycle leak, found June 12).
+        payload = cmc_client._fetch_keyless(
+            "get_crypto_quotes_latest", {"id": "1839"}  # id-only: ticker lookups can hit knockoffs
+        )
         by_symbol = cmc_client._by_symbol(payload)
         bnb = by_symbol.get("BNB")
         if isinstance(bnb, dict):
