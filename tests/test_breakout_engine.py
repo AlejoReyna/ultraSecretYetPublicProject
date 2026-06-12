@@ -165,7 +165,10 @@ def test_universe_quotes_only_best_ranked_candidate_when_it_enters() -> None:
     assert decision.symbol == "LINK"
     assert decision.should_enter is True
     assert decision.estimated_slippage_pct == 0.005
-    assert twak.calls == [(500.0, "USDC", "LINK")]
+    # evaluate_all quotes up to MAX_UNIVERSE_TWAK_QUOTES candidates (best
+    # first) so the ML ranker can choose among multiple quoted passers.
+    assert twak.calls[0] == (500.0, "USDC", "LINK")
+    assert len(twak.calls) <= 2
 
 
 def test_universe_quotes_runner_up_only_when_best_slippage_fails() -> None:

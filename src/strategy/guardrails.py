@@ -157,8 +157,23 @@ class Guardrails:
             self._daily_loss_pct += abs(realized_pnl_pct)
         if realized_pnl_pct < -0.005:
             self._loss_streak += 1
-        else:
+        elif realized_pnl_pct > 0:
+            # Only a profitable exit resets the streak. Entry bookkeeping calls
+            # this with exactly 0.0 and must not wipe a loss streak built from
+            # real exits, otherwise the streak pause can never trigger.
             self._loss_streak = 0
+        self._save_state()
+
+    def record_compliance_trade(self) -> None:
+        """Count a non-directional compliance trade (e.g. stable-to-stable swap).
+
+        Stable symbols are settlement tokens and fail ``assert_tradable_symbol``,
+        but a tiny stable swap is still an on-chain trade for the competition's
+        one-trade-per-day minimum, so it increments the daily counter directly.
+        """
+
+        self._reset_daily_if_needed()
+        self._daily_trade_count += 1
         self._save_state()
 
     def can_open_new_trade(self) -> bool:
@@ -225,6 +240,7 @@ class Guardrails:
         self._daily_date = self._date_from_state(payload.get("last_reset_date"))
         self._daily_loss_pct = float(payload.get("daily_loss_pct", 0.0))
         self._loss_streak = int(payload.get("loss_streak", 0))
+        self._kill_switch = bool(payload.get("kill_switch", False))
         last_trade_day = payload.get("last_trade_day")
         if last_trade_day:
             parsed_day = datetime.fromisoformat(str(last_trade_day))
@@ -237,6 +253,7 @@ class Guardrails:
             "daily_realized_loss": self._daily_realized_loss_usdc,
             "daily_loss_pct": self._daily_loss_pct,
             "loss_streak": self._loss_streak,
+            "kill_switch": self._kill_switch,
             "last_trade_day": self._last_trade_day.isoformat() if self._last_trade_day else None,
             "portfolio_ath": self._all_time_high_usdc,
             "last_reset_date": self._daily_date.isoformat(),

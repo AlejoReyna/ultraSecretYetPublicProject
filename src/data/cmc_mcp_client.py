@@ -246,6 +246,14 @@ class CMCMCPClient:
             default_asset=settings.cmc_x402_asset,
             chain_id=settings.cmc_x402_chain_id,
         )
+        from src.data.x402_spend_governor import X402SpendGovernor
+
+        self.spend_governor = X402SpendGovernor(
+            daily_budget_usdc=getattr(settings, "x402_daily_budget_usdc", 2.0),
+            total_budget_usdc=getattr(settings, "x402_total_budget_usdc", 15.0),
+            cost_per_call_usdc=settings.cmc_x402_amount,
+            failure_cooldown_seconds=getattr(settings, "x402_failure_cooldown_seconds", 900),
+        )
 
     def get_crypto_quotes_latest(self, symbols: list[str]) -> dict[str, Any]:
         """Fetch latest quotes; Keyless API is primary when ``use_keyless_primary`` is set."""
@@ -549,12 +557,17 @@ class CMCMCPClient:
 
         if self.settings.use_keyless_primary:
             keyless_data = self._fetch_keyless(tool_name, arguments)
-            if self._x402_shadow_enabled():
+            if self._x402_shadow_enabled() and self.spend_governor.allow_call():
                 try:
                     self.x402_client.request_with_x402("POST", envelope, headers=headers)
+                    self.spend_governor.record_spend()
                 except Exception as exc:
                     LOGGER.debug("x402 SDK shadow request failed: %s", exc)
+                    self.spend_governor.record_failure()
             return keyless_data
+
+        if not self.spend_governor.allow_call():
+            return self._fetch_keyless(tool_name, arguments)
 
         try:
             payload = self.x402_client.request_with_x402(
@@ -564,8 +577,10 @@ class CMCMCPClient:
             )
             if payload is None:
                 raise RuntimeError("x402 client returned None")
+            self.spend_governor.record_spend()
         except Exception as exc:
             LOGGER.warning("CMC MCP x402 call %s failed: %s", tool_name, exc)
+            self.spend_governor.record_failure()
             return self._fetch_keyless(tool_name, arguments)
 
         if not isinstance(payload, dict):
@@ -581,6 +596,9 @@ class CMCMCPClient:
 
     def _call_tool_x402(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Always route through x402 payment (never keyless-primary shortcut)."""
+
+        if not self.spend_governor.allow_call():
+            return self._fetch_keyless(tool_name, arguments)
 
         envelope = {
             "jsonrpc": "2.0",
@@ -607,8 +625,10 @@ class CMCMCPClient:
             )
             if payload is None:
                 raise RuntimeError("x402 client returned None")
+            self.spend_governor.record_spend()
         except Exception as exc:
             LOGGER.warning("CMC MCP x402 call %s failed: %s", tool_name, exc)
+            self.spend_governor.record_failure()
             return self._fetch_keyless(tool_name, arguments)
 
         if not isinstance(payload, dict):

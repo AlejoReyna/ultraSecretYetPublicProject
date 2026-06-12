@@ -53,7 +53,9 @@ class HyperoptReplayEngine:
         for record in self.executions:
             if str(record.get("action", "")).lower() != "exit":
                 continue
-            symbol = str(record.get("to_symbol") or record.get("from_symbol") or "").upper()
+            # An exit swap sells the position token INTO the stable, so the
+            # position symbol is from_symbol (to_symbol is the stablecoin).
+            symbol = str(record.get("from_symbol") or record.get("to_symbol") or "").upper()
             exits_by_symbol.setdefault(symbol, []).append(record)
 
         for decision in self.decisions:

@@ -24,6 +24,9 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
         "execution_log_path": str(tmp_path / "execution_log.jsonl"),
         "decision_log_path": str(tmp_path / "decision_log.jsonl"),
         "loop_seconds": 0,
+        # No health server in tests: a real bind on a fixed port collides
+        # across run_agent invocations within one pytest process.
+        "health_check_port": 0,
     }
     values.update(overrides)
     return Settings(**values)
@@ -56,6 +59,14 @@ def _install_fast_fakes(
     class FakeTWAK:
         def __init__(self, paper_trade: bool = False) -> None:
             self.paper_trade = paper_trade
+
+        def estimate_slippage_pct(
+            self,
+            amount: float,
+            from_token: str,
+            to_token: str,
+        ) -> float:
+            return 0.002
 
     class FakeRouter:
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -219,11 +230,19 @@ def test_kill_switch_stops_loop(monkeypatch: Any, tmp_path: Path) -> None:
         calls["liquidate"] += 1
 
     monkeypatch.setattr(main_module, "emergency_liquidate", fake_liquidate)
+    monkeypatch.setattr(
+        main_module, "_ensure_daily_minimum_trade", lambda *args, **kwargs: False
+    )
 
     main_module.run_agent(_settings(tmp_path, guardrail_state_path=str(guardrail_path)), max_cycles=3)
 
-    assert calls["liquidate"] == 1
-    decision = _read_first_jsonl(tmp_path / "logs" / "decision_live.jsonl")
+    # Competition behavior: with no open positions there is nothing to
+    # liquidate, and the loop must stay alive in capital-preservation mode
+    # (halting would silently fail the one-trade-per-day minimum).
+    assert calls["liquidate"] == 0
+    lines = (tmp_path / "logs" / "decision_live.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3, "kill switch must not break the loop"
+    decision = json.loads(lines[0])
     assert decision["action"] == "HALT"
     assert decision["risk_state"] == "kill_switch"
 

@@ -31,6 +31,10 @@ class Settings(BaseModel):
     # objects, and x402 data micropayment keys must stay isolated in src.data.
     cmc_x402_chain_id: int = 8453
     cmc_x402_max_usdc_per_call: float = 0.01
+    x402_daily_budget_usdc: float = 2.0
+    x402_total_budget_usdc: float = 15.0
+    x402_failure_cooldown_seconds: int = 900
+    x402_in_position_ttl_seconds: int = 1800
     use_keyless_primary: bool = False
     use_dual_market_data: bool = False
     cmc_keyless_base_url: str = "https://pro-api.coinmarketcap.com/trial-pro-api/v3"
@@ -192,6 +196,10 @@ def load_settings(dotenv_path: str | None = None) -> Settings:
         ),
         "cmc_x402_chain_id": _get_int("CMC_X402_CHAIN_ID", 8453),
         "cmc_x402_max_usdc_per_call": _get_float("CMC_X402_MAX_USDC_PER_CALL", 0.01),
+        "x402_daily_budget_usdc": _get_float("X402_DAILY_BUDGET_USDC", 2.0),
+        "x402_total_budget_usdc": _get_float("X402_TOTAL_BUDGET_USDC", 15.0),
+        "x402_failure_cooldown_seconds": _get_int("X402_FAILURE_COOLDOWN_SECONDS", 900),
+        "x402_in_position_ttl_seconds": _get_int("X402_IN_POSITION_TTL_SECONDS", 1800),
         "use_keyless_primary": use_keyless_primary,
         "use_dual_market_data": use_dual_market_data,
         "cmc_keyless_base_url": os.getenv(

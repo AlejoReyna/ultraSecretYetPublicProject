@@ -19,6 +19,9 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
         "guardrail_state_path": str(tmp_path / "guardrail_state.json"),
         "execution_log_path": str(tmp_path / "execution_log.jsonl"),
         "decision_log_path": str(tmp_path / "decision_log.jsonl"),
+        # No health server in tests: a real bind on a fixed port collides
+        # across run_agent invocations within one pytest process.
+        "health_check_port": 0,
     }
     values.update(overrides)
     return Settings(**values)
@@ -56,7 +59,16 @@ def _patch_run_agent_dependencies(
             portfolio_value_usdc: float,
         ) -> main_module.BreakoutDecision:
             if decision is None:
-                raise AssertionError("engine should not evaluate when entries are blocked")
+                # The telemetry path (_telemetry_candidate_for_log) evaluates
+                # the engine every cycle by design; return a no-enter decision.
+                return main_module.BreakoutDecision(
+                    should_enter=False,
+                    symbol=None,
+                    position_size_usdc=0.0,
+                    factor_scores={},
+                    true_factor_count=0,
+                    reason="no signal evaluated",
+                )
             return decision
 
     monkeypatch.setattr(main_module, "BnbToolkitWrapper", FakeToolkit)
@@ -66,7 +78,7 @@ def _patch_run_agent_dependencies(
     monkeypatch.setattr(
         main_module,
         "_fetch_snapshot",
-        lambda settings, cmc_client: {"CAKE": {"symbol": "CAKE", "price": 2.0}},
+        lambda settings, cmc_client, in_position=False: {"CAKE": {"symbol": "CAKE", "price": 2.0}},
     )
 
 

@@ -67,6 +67,8 @@ LIVE_WINDOW_MONTH = 6
 LIVE_WINDOW_START_DAY = 22
 LIVE_WINDOW_END_DAY = 28
 PREFLIGHT_QUOTE_AMOUNT_USDC = 0.5
+COMPLIANCE_TRADE_USDC = 5.0
+COMPLIANCE_TRIGGER_HOUR_UTC = 22
 SCHEMA_VERSION = "2.6.0"
 
 
@@ -167,6 +169,7 @@ def emergency_liquidate(
 def print_balances(toolkit: BnbToolkitWrapper, settings: Settings) -> None:
     """Print the operator's key balances for preflight checks."""
 
+    print(f"Trading wallet (BSC){_wallet_suffix(settings.wallet_address)}")
     symbols = ["BNB", settings.default_stable_symbol.upper(), "USDT"]
     seen: set[str] = set()
     for symbol in symbols:
@@ -175,7 +178,53 @@ def print_balances(toolkit: BnbToolkitWrapper, settings: Settings) -> None:
         seen.add(symbol)
         balance = toolkit.get_balance(symbol)
         amount = balance.get("balance", balance.get("amount"))
-        print(f"{symbol}: {_number(amount):.8f}")
+        print(f"  {symbol}: {_number(amount):.8f}")
+    _print_x402_wallet_section(settings)
+
+
+def _wallet_suffix(address: str | None) -> str:
+    value = (address or "").strip()
+    return f" {_mask_address(value)}" if value else ""
+
+
+def _print_x402_wallet_section(settings: Settings) -> None:
+    """Print the x402 data-payment wallet (Base) balance and spend ledger."""
+
+    try:
+        from src.data.x402_wallet_view import fetch_x402_wallet_view
+    except ImportError as exc:
+        print(f"x402 data wallet (Base): unavailable ({exc})")
+        return
+
+    view = fetch_x402_wallet_view(base_rpc_url=settings.base_rpc_url)
+    if view.address is None:
+        print("x402 data wallet (Base): not configured (no payment key in env)")
+        return
+    print(f"x402 data wallet (Base) {_mask_address(view.address)}")
+    if view.usdc_balance is not None:
+        print(f"  USDC: {view.usdc_balance:.6f}")
+    else:
+        print(f"  USDC: read failed ({view.error or 'unknown error'})")
+
+    try:
+        from src.data.x402_spend_governor import X402SpendGovernor
+
+        ledger = X402SpendGovernor(
+            daily_budget_usdc=getattr(settings, "x402_daily_budget_usdc", 2.0),
+            total_budget_usdc=getattr(settings, "x402_total_budget_usdc", 15.0),
+            cost_per_call_usdc=settings.cmc_x402_amount,
+            failure_cooldown_seconds=getattr(settings, "x402_failure_cooldown_seconds", 900),
+        ).snapshot()
+        print(
+            "  spend today: ${daily:.2f}/${daily_cap:.2f} | window total: ${total:.2f}/${total_cap:.2f}".format(
+                daily=float(ledger["daily_spend_usdc"]),
+                daily_cap=float(ledger["daily_budget_usdc"]),
+                total=float(ledger["total_spend_usdc"]),
+                total_cap=float(ledger["total_budget_usdc"]),
+            )
+        )
+    except Exception as exc:
+        LOGGER.debug("x402 spend ledger unavailable: %s", exc)
 
 
 def run_live_preflight(settings: Settings) -> bool:
@@ -421,7 +470,11 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
     while running:
         cycle_number = cycles_completed + 1
         now_utc = datetime.now(timezone.utc)
-        market_snapshot = _fetch_snapshot(settings, cmc_client)
+        market_snapshot = _fetch_snapshot(
+            settings,
+            cmc_client,
+            in_position=bool(position_manager.list_open_positions()),
+        )
         _update_price_cache(price_cache, market_snapshot, now_utc)
         if needs_balance_reconstruction:
             reconstructed = _reconstruct_positions_from_balances(
@@ -492,7 +545,13 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                 liquidity=liquidity,
                 position_count=len(position_manager.list_open_positions()),
             )
-            emergency_liquidate(position_manager, router, guardrails)
+            if position_manager.list_open_positions():
+                emergency_liquidate(position_manager, router, guardrails)
+            # Stay alive in capital-preservation mode instead of halting: the
+            # competition requires at least one trade per UTC day, so a halted
+            # agent would be disqualified on trade count even after surviving
+            # the drawdown gate. Only the tiny stable-swap backstop runs here.
+            _ensure_daily_minimum_trade(settings, router, guardrails, datetime.now(timezone.utc))
             if settings.demo_mode:
                 _print_demo_cycle_summary(
                     cycle_number,
@@ -504,7 +563,14 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     status=cycle_status,
                     settings=settings,
                 )
-            break
+            cycles_completed += 1
+            if max_cycles is not None and cycles_completed >= max_cycles:
+                LOGGER.info("Completed %s cycle(s); exiting", cycles_completed)
+                break
+            sleep_until = time.monotonic() + settings.loop_seconds
+            while running and time.monotonic() < sleep_until:
+                time.sleep(min(1.0, sleep_until - time.monotonic()))
+            continue
 
         _process_position_exits(position_manager, router, guardrails, market_snapshot, portfolio_value, price_cache)
         _monitor_position_exits_if_needed(
@@ -660,6 +726,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             except Exception as exc:
                 LOGGER.warning("Shadow logging failed: %s", exc)
 
+        _ensure_daily_minimum_trade(settings, router, guardrails, datetime.now(timezone.utc))
         _log_live_window_warning(guardrails)
         update_health_snapshot(
             health_state,
@@ -1537,16 +1604,28 @@ if not hasattr(scoring, "evaluate_universe"):
     scoring.evaluate_universe = fallback_evaluate_universe
 
 
-def _fetch_snapshot(settings: Settings, cmc_client: CMCMCPClient) -> dict[str, dict[str, Any]]:
+def _fetch_snapshot(
+    settings: Settings,
+    cmc_client: CMCMCPClient,
+    in_position: bool = False,
+) -> dict[str, dict[str, Any]]:
     if settings.paper_trade:
         return _paper_market_snapshot()
 
     if settings.use_dual_market_data and not settings.use_keyless_primary:
         keyless_ttl = settings.cmc_keyless_snapshot_ttl_seconds or settings.loop_seconds
+        # Spend paid x402 refreshes where they matter: tight cadence while
+        # capital is deployed, slow baseline cadence while flat in stables.
+        # The spend governor in CMCMCPClient still enforces the hard budget.
+        x402_ttl = (
+            getattr(settings, "x402_in_position_ttl_seconds", 1800)
+            if in_position
+            else settings.cmc_snapshot_ttl_seconds
+        )
 
         def _load_dual() -> dict[str, dict[str, Any]]:
             snapshot = get_dual_market_snapshot_cache().get_merged_snapshot(
-                settings.cmc_snapshot_ttl_seconds,
+                x402_ttl,
                 keyless_ttl,
                 lambda: cmc_client.fetch_x402_enriched_snapshot(TARGET_SYMBOLS),
                 lambda: cmc_client.fetch_keyless_quotes_snapshot(TARGET_SYMBOLS),
@@ -2098,6 +2177,54 @@ def _format_fraction_pct(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value * 100:.2f}%"
+
+
+def _ensure_daily_minimum_trade(
+    settings: Settings,
+    router: PancakeSwapRouter,
+    guardrails: Guardrails,
+    now_utc: datetime,
+) -> bool:
+    """Fail-safe for the competition's one-trade-per-UTC-day minimum.
+
+    If no trade has been recorded today and fewer than two hours remain in the
+    UTC day, execute a tiny stable-to-stable swap (both legs are eligible
+    competition tokens). This keeps the agent qualified even when risk states
+    (daily pause, loss-streak pause, kill switch) block directional entries,
+    at negligible market risk. The richer momentum-ranked minimum-trade path
+    still runs first when entries are allowed; this is the last resort.
+    """
+
+    if int(getattr(guardrails, "_daily_trade_count", 0)) >= 1:
+        return False
+    if now_utc.hour < COMPLIANCE_TRIGGER_HOUR_UTC:
+        return False
+    stable = settings.default_stable_symbol.upper()
+    counter = "USDT" if stable != "USDT" else "USDC"
+    try:
+        result = _execute_logged_swap(
+            settings,
+            router,
+            "compliance_min_trade",
+            stable,
+            counter,
+            COMPLIANCE_TRADE_USDC,
+            _require_execution_slippage(settings.max_slippage_pct),
+        )
+    except Exception as exc:
+        LOGGER.error("Compliance minimum trade failed; will retry next cycle: %s", exc)
+        return False
+    if not _execution_has_tx_hash(result):
+        LOGGER.error("Compliance minimum trade returned no tx hash; will retry next cycle")
+        return False
+    guardrails.record_compliance_trade()
+    LOGGER.warning(
+        "Compliance minimum trade executed: %s -> %s $%.2f",
+        stable,
+        counter,
+        COMPLIANCE_TRADE_USDC,
+    )
+    return True
 
 
 def _log_live_window_warning(guardrails: Guardrails) -> None:
