@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.config.settings import Settings
-from src.config.tokens import has_bsc_contract, is_liquid, is_tradable_symbol
+from src.config.tokens import has_bsc_contract, is_liquid, is_momentum_candidate_symbol
 from src.strategy.candidate_adapter import (
     coerce_entry_candidate,
     decimal_div,
@@ -34,7 +34,7 @@ def fallback_scoring_evaluate_universe(
     ranked: list[tuple[int, float, EntryCandidate]] = []
     for raw_symbol, raw_data in snapshot.items():
         symbol = str(raw_symbol).upper()
-        if symbol in excluded or not is_tradable_symbol(symbol) or not has_bsc_contract(symbol):
+        if symbol in excluded or not is_momentum_candidate_symbol(symbol) or not has_bsc_contract(symbol):
             continue
         data = {"symbol": symbol, **raw_data}
         if not is_liquid(data):
@@ -74,14 +74,18 @@ def fallback_scoring_evaluate_universe(
             "slippage_under_cap": slippage_ok,
         }
         true_factor_count = sum(1 for passed in factor_scores.values() if passed)
-        required = min(len(factor_scores), max(settings.min_entry_factors, regime_result.min_entry_factors))
-        if true_factor_count < required:
+        entry_factors = (volume_breakout, high_break, trend_ok, slippage_ok)
+        entry_factor_count = sum(1 for passed in entry_factors if passed)
+        required = min(len(entry_factors), max(settings.min_entry_factors, regime_result.min_entry_factors))
+        if entry_factor_count < required:
             continue
 
+        regime_size_modifier = 1.0 if regime_ok else float(getattr(settings, "regime_size_multiplier", 0.5))
         provisional_size = portfolio_value * settings.max_position_pct * regime_result.position_multiplier
+        provisional_size *= regime_size_modifier
         provisional_size *= risk_decision.position_multiplier
         expected_amount_out = decimal_div(provisional_size, price)
-        reason = f"{true_factor_count}/{len(factor_scores)} v2.5 gates passed"
+        reason = f"{entry_factor_count}/{len(entry_factors)} v2.5 entry gates passed"
         ranked.append(
             (
                 true_factor_count,
@@ -122,7 +126,7 @@ def fallback_best_near_miss(
     ranked: list[tuple[int, float, EntryCandidate]] = []
     for raw_symbol, raw_data in snapshot.items():
         symbol = str(raw_symbol).upper()
-        if symbol in excluded or not is_tradable_symbol(symbol) or not has_bsc_contract(symbol):
+        if symbol in excluded or not is_momentum_candidate_symbol(symbol) or not has_bsc_contract(symbol):
             continue
         data = {"symbol": symbol, **raw_data}
         if not is_liquid(data):
@@ -162,10 +166,14 @@ def fallback_best_near_miss(
             "slippage_under_cap": slippage_ok,
         }
         true_factor_count = sum(1 for passed in factor_scores.values() if passed)
-        required = min(len(factor_scores), max(settings.min_entry_factors, regime_result.min_entry_factors))
+        entry_factors = (volume_breakout, high_break, trend_ok, slippage_ok)
+        entry_factor_count = sum(1 for passed in entry_factors if passed)
+        required = min(len(entry_factors), max(settings.min_entry_factors, regime_result.min_entry_factors))
+        regime_size_modifier = 1.0 if regime_ok else float(getattr(settings, "regime_size_multiplier", 0.5))
         provisional_size = portfolio_value * settings.max_position_pct * regime_result.position_multiplier
+        provisional_size *= regime_size_modifier
         provisional_size *= risk_decision.position_multiplier
-        reason = f"{true_factor_count}/{len(factor_scores)} v2.5 gates passed (need {required})"
+        reason = f"{entry_factor_count}/{len(entry_factors)} v2.5 entry gates passed (need {required})"
         ranked.append(
             (
                 true_factor_count,

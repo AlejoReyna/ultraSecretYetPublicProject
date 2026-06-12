@@ -30,7 +30,7 @@ from src.config.tokens import (
     TRADABLE_TARGET_SYMBOLS,
     has_verified_bsc_contract,
     is_liquid,
-    is_tradable_symbol,
+    is_momentum_candidate_symbol,
 )
 from src.data.cmc_mcp_client import CMCMCPClient
 from src.data.market_snapshot_cache import get_dual_market_snapshot_cache, get_market_snapshot_cache
@@ -67,8 +67,10 @@ LIVE_WINDOW_MONTH = 6
 LIVE_WINDOW_START_DAY = 22
 LIVE_WINDOW_END_DAY = 28
 PREFLIGHT_QUOTE_AMOUNT_USDC = 0.5
-COMPLIANCE_TRADE_USDC = 5.0
+COMPLIANCE_TRADE_USDC = 0.5
 COMPLIANCE_TRIGGER_HOUR_UTC = 22
+MIN_PORTFOLIO_RETAINED_USDC = 2.0
+COMPLIANCE_TO_SYMBOL = "TWT"
 SCHEMA_VERSION = "2.6.0"
 
 
@@ -550,8 +552,14 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             # Stay alive in capital-preservation mode instead of halting: the
             # competition requires at least one trade per UTC day, so a halted
             # agent would be disqualified on trade count even after surviving
-            # the drawdown gate. Only the tiny stable-swap backstop runs here.
-            _ensure_daily_minimum_trade(settings, router, guardrails, datetime.now(timezone.utc))
+            # the drawdown gate. Only the tiny compliance-swap backstop runs here.
+            _ensure_daily_minimum_trade(
+                settings,
+                router,
+                guardrails,
+                datetime.now(timezone.utc),
+                portfolio_value,
+            )
             if settings.demo_mode:
                 _print_demo_cycle_summary(
                     cycle_number,
@@ -652,6 +660,16 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     if attempt.entered:
                         action = "ENTER"
 
+        if action != "ENTER" and _ensure_daily_minimum_trade(
+            settings,
+            router,
+            guardrails,
+            datetime.now(timezone.utc),
+            portfolio_value,
+        ):
+            action = "ENTER"
+            decision_reasons.append("compliance: daily minimum trade")
+
         if settings.demo_mode:
             demo_decision = _breakout_decision_from_candidate(
                 candidate,
@@ -726,7 +744,6 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             except Exception as exc:
                 LOGGER.warning("Shadow logging failed: %s", exc)
 
-        _ensure_daily_minimum_trade(settings, router, guardrails, datetime.now(timezone.utc))
         _log_live_window_warning(guardrails)
         update_health_snapshot(
             health_state,
@@ -959,8 +976,7 @@ def check_daily_minimum_compliance(
     del cycle_id
     if int(getattr(guardrails, "_daily_trade_count", 0)) >= 1:
         return None
-    hours_left = 24 - now_utc.hour
-    if hours_left > 4:
+    if now_utc.hour < COMPLIANCE_TRIGGER_HOUR_UTC:
         return None
     if regime_result.regime == MarketRegime.RISK_OFF:
         return MinimumTradeDecision(
@@ -988,7 +1004,7 @@ def _minimum_trade_candidate(
         if decision.symbol is not None and normalized != decision.symbol.upper():
             continue
         payload = {"symbol": normalized, **data}
-        if not is_tradable_symbol(normalized) or not has_verified_bsc_contract(normalized) or not is_liquid(payload):
+        if not is_momentum_candidate_symbol(normalized) or not has_verified_bsc_contract(normalized) or not is_liquid(payload):
             continue
         price = _maybe_number(payload.get("price"))
         if price is None or price <= 0:
@@ -1061,8 +1077,22 @@ def _attempt_entry_v25(
         if getattr(liquidity, "recommendation", "") == "REDUCE_SIZE":
             position_pct *= 0.5
         position_usd = portfolio_value * position_pct
+    if candidate.factor_scores.get("regime_not_risk_off") is False:
+        position_pct *= 0.5
+        position_usd = portfolio_value * position_pct
+    capped_position_usd = _cap_spend_to_portfolio_floor(position_usd, portfolio_value)
+    if capped_position_usd < position_usd:
+        LOGGER.warning(
+            "Reducing %s entry from $%.2f to $%.2f to preserve $%.2f portfolio floor",
+            candidate.symbol,
+            position_usd,
+            capped_position_usd,
+            MIN_PORTFOLIO_RETAINED_USDC,
+        )
+        position_usd = capped_position_usd
+        position_pct = position_usd / portfolio_value if portfolio_value > 0 else 0.0
     if position_usd <= 0:
-        return EntryAttempt(False, "position size is zero", position_pct, liquidity)
+        return EntryAttempt(False, "portfolio floor prevents spend", position_pct, liquidity)
 
     expected_amount_out = _decimal_div(position_usd, candidate.price)
     balance_before = _balance_before_for_reconciliation(toolkit, candidate.symbol)
@@ -1424,7 +1454,7 @@ def _telemetry_candidate_from_priced_targets(
 
     ranked: list[tuple[float, EntryCandidate]] = []
     for symbol in _priced_target_symbols(market_snapshot):
-        if not is_tradable_symbol(symbol):
+        if not is_momentum_candidate_symbol(symbol):
             continue
         data = market_snapshot.get(symbol, {})
         if not isinstance(data, dict):
@@ -1614,14 +1644,10 @@ def _fetch_snapshot(
 
     if settings.use_dual_market_data and not settings.use_keyless_primary:
         keyless_ttl = settings.cmc_keyless_snapshot_ttl_seconds or settings.loop_seconds
-        # Spend paid x402 refreshes where they matter: tight cadence while
-        # capital is deployed, slow baseline cadence while flat in stables.
-        # The spend governor in CMCMCPClient still enforces the hard budget.
-        x402_ttl = (
-            getattr(settings, "x402_in_position_ttl_seconds", 1800)
-            if in_position
-            else settings.cmc_snapshot_ttl_seconds
-        )
+        # Keep paid x402 enrichment fresh enough for short-window breakout
+        # factors even while flat; the spend governor still enforces budget.
+        x402_refresh_ttl = getattr(settings, "x402_in_position_ttl_seconds", 1800) or 1800
+        x402_ttl = min(settings.cmc_snapshot_ttl_seconds, x402_refresh_ttl)
 
         def _load_dual() -> dict[str, dict[str, Any]]:
             snapshot = get_dual_market_snapshot_cache().get_merged_snapshot(
@@ -1668,7 +1694,7 @@ def _ensure_bnb_reference(snapshot: dict[str, dict[str, Any]], cmc_client: CMCMC
                 "low_24h": _maybe_number(bnb.get("low_24h")),
             }
     except Exception as exc:
-        LOGGER.debug("Could not fetch BNB reference snapshot: %s", exc)
+        LOGGER.warning("Could not fetch BNB reference snapshot: %s", exc)
 
 
 def _load_positions_or_reconstruct(
@@ -1910,6 +1936,28 @@ def _maybe_enter_position(
         )
     if slippage is None or slippage < 0:
         LOGGER.warning("Signal ignored for %s because slippage is missing", decision.symbol)
+        return
+    capped_size = _cap_spend_to_portfolio_floor(decision.position_size_usdc, portfolio_value)
+    if capped_size < decision.position_size_usdc:
+        LOGGER.warning(
+            "Reducing %s entry from $%.2f to $%.2f to preserve $%.2f portfolio floor",
+            decision.symbol,
+            decision.position_size_usdc,
+            capped_size,
+            MIN_PORTFOLIO_RETAINED_USDC,
+        )
+        decision = BreakoutDecision(
+            should_enter=decision.should_enter,
+            symbol=decision.symbol,
+            position_size_usdc=capped_size,
+            factor_scores=decision.factor_scores,
+            true_factor_count=decision.true_factor_count,
+            reason=decision.reason,
+            estimated_slippage_pct=decision.estimated_slippage_pct,
+            ml_context=decision.ml_context,
+        )
+    if decision.position_size_usdc <= 0:
+        LOGGER.warning("Signal ignored for %s because portfolio floor prevents spend", decision.symbol)
         return
     guardrails.validate_new_trade(
         decision.symbol,
@@ -2190,23 +2238,41 @@ def _ensure_daily_minimum_trade(
     router: PancakeSwapRouter,
     guardrails: Guardrails,
     now_utc: datetime,
+    portfolio_value_usdc: float,
 ) -> bool:
     """Fail-safe for the competition's one-trade-per-UTC-day minimum.
 
     If no trade has been recorded today and fewer than two hours remain in the
-    UTC day, execute a tiny stable-to-stable swap (both legs are eligible
-    competition tokens). This keeps the agent qualified even when risk states
-    (daily pause, loss-streak pause, kill switch) block directional entries,
-    at negligible market risk. The richer momentum-ranked minimum-trade path
-    still runs first when entries are allowed; this is the last resort.
+    UTC day, execute a tiny allowlisted stable-to-token swap through TWAK.
+    This keeps the agent qualified even when risk states (daily pause,
+    loss-streak pause, kill switch) block directional entries, at minimal size.
+    The richer momentum-ranked minimum-trade path still runs first when entries
+    are allowed; this is the last resort.
     """
 
     if int(getattr(guardrails, "_daily_trade_count", 0)) >= 1:
         return False
+    if guardrails.compliance_trade_recorded_today(now_utc):
+        return False
     if now_utc.hour < COMPLIANCE_TRIGGER_HOUR_UTC:
         return False
+    amount_in = _cap_spend_to_portfolio_floor(COMPLIANCE_TRADE_USDC, portfolio_value_usdc)
+    if amount_in < COMPLIANCE_TRADE_USDC:
+        LOGGER.warning(
+            "Skipping compliance minimum trade: $%.2f portfolio cannot preserve $%.2f floor",
+            portfolio_value_usdc,
+            MIN_PORTFOLIO_RETAINED_USDC,
+        )
+        return False
     stable = settings.default_stable_symbol.upper()
-    counter = "USDT" if stable != "USDT" else "USDC"
+    if stable == "BNB":
+        stable = "USDC"
+    counter = COMPLIANCE_TO_SYMBOL
+    if counter == stable:
+        counter = "USDC" if stable != "USDC" else "USDT"
+    if "BNB" in {stable, counter}:
+        LOGGER.error("Compliance minimum trade refused because BNB would be used as a leg")
+        return False
     try:
         result = _execute_logged_swap(
             settings,
@@ -2214,8 +2280,9 @@ def _ensure_daily_minimum_trade(
             "compliance_min_trade",
             stable,
             counter,
-            COMPLIANCE_TRADE_USDC,
+            amount_in,
             _require_execution_slippage(settings.max_slippage_pct),
+            reason="compliance: daily minimum trade",
         )
     except Exception as exc:
         LOGGER.error("Compliance minimum trade failed; will retry next cycle: %s", exc)
@@ -2223,12 +2290,12 @@ def _ensure_daily_minimum_trade(
     if not _execution_has_tx_hash(result):
         LOGGER.error("Compliance minimum trade returned no tx hash; will retry next cycle")
         return False
-    guardrails.record_compliance_trade()
+    guardrails.record_compliance_trade(now_utc)
     LOGGER.warning(
         "Compliance minimum trade executed: %s -> %s $%.2f",
         stable,
         counter,
-        COMPLIANCE_TRADE_USDC,
+        amount_in,
     )
     return True
 
@@ -2278,6 +2345,11 @@ def _require_execution_slippage(slippage_pct: float | None) -> float:
     return slippage_pct
 
 
+def _cap_spend_to_portfolio_floor(amount_usdc: float, portfolio_value_usdc: float) -> float:
+    max_spend = max(0.0, portfolio_value_usdc - MIN_PORTFOLIO_RETAINED_USDC)
+    return max(0.0, min(amount_usdc, max_spend))
+
+
 def _execute_logged_swap(
     settings: Settings,
     router: PancakeSwapRouter,
@@ -2287,6 +2359,7 @@ def _execute_logged_swap(
     amount_in: float,
     max_slippage_pct: float,
     expected_amount_out: float | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     try:
         result = router.swap_exact_in(
@@ -2306,6 +2379,7 @@ def _execute_logged_swap(
             max_slippage_pct=max_slippage_pct,
             expected_amount_out=expected_amount_out,
             error=str(exc),
+            reason=reason,
         )
         raise
 
@@ -2318,6 +2392,7 @@ def _execute_logged_swap(
         max_slippage_pct=max_slippage_pct,
         expected_amount_out=expected_amount_out,
         result=result,
+        reason=reason,
     )
     return result
 

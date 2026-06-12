@@ -441,6 +441,10 @@ class CMCMCPClient:
                     combined,
                     ("percent_change_1h", "quote.USD.percent_change_1h", "price_change_percentage_1h", "change_1h"),
                 ),
+                "percent_change_6h": self._first_number_from_many(
+                    combined,
+                    ("percent_change_6h", "quote.USD.percent_change_6h", "price_change_percentage_6h", "change_6h"),
+                ),
                 "percent_change_24h": self._first_number_from_many(
                     combined,
                     (
@@ -457,6 +461,8 @@ class CMCMCPClient:
                 ),
                 "high_3h": self._first_number_from_many(combined, ("high_3h", "high_3h_price")),
                 "high_6h": self._first_number_from_many(combined, ("high_6h", "high_6h_price")),
+                "high_24h": self._first_number_from_many(combined, ("high_24h", "high_24h_price")),
+                "low_24h": self._first_number_from_many(combined, ("low_24h", "low_24h_price")),
                 "bnb_1h_trend_pct": bnb_trend,
                 "rsi": self._first_number_from_many(combined, ("rsi", "rsi_14", "technical.rsi")),
                 "macd": self._first_number_from_many(combined, ("macd", "technical.macd")),
@@ -521,6 +527,10 @@ class CMCMCPClient:
                     [quote_data],
                     ("percent_change_1h", "quote.USD.percent_change_1h", "price_change_percentage_1h", "change_1h"),
                 ),
+                "percent_change_6h": self._first_number_from_many(
+                    [quote_data],
+                    ("percent_change_6h", "quote.USD.percent_change_6h", "price_change_percentage_6h", "change_6h"),
+                ),
                 "percent_change_24h": self._first_number_from_many(
                     [quote_data],
                     (
@@ -531,6 +541,10 @@ class CMCMCPClient:
                     ),
                 ),
                 "rolling_24h_hourly_volume_avg": volume_24h / 24 if volume_24h else None,
+                "high_3h": self._first_number_from_many([quote_data], ("high_3h", "high_3h_price")),
+                "high_6h": self._first_number_from_many([quote_data], ("high_6h", "high_6h_price")),
+                "high_24h": self._first_number_from_many([quote_data], ("high_24h", "high_24h_price")),
+                "low_24h": self._first_number_from_many([quote_data], ("low_24h", "low_24h_price")),
                 "bnb_1h_trend_pct": bnb_trend,
                 "estimated_slippage_pct": estimated_slippage_pct,
             }
@@ -562,7 +576,7 @@ class CMCMCPClient:
                     self.x402_client.request_with_x402("POST", envelope, headers=headers)
                     self.spend_governor.record_spend()
                 except Exception as exc:
-                    LOGGER.debug("x402 SDK shadow request failed: %s", exc)
+                    LOGGER.warning("x402 SDK shadow request failed: %s", exc)
                     self.spend_governor.record_failure()
             return keyless_data
 
@@ -864,13 +878,22 @@ class CMCMCPClient:
         if not symbols:
             return {}
         if len(symbols) <= cls._SNAPSHOT_BATCH_SIZE:
-            return fetcher(symbols)
+            try:
+                return fetcher(symbols)
+            except Exception as exc:
+                LOGGER.warning("CMC snapshot fetch failed for %s: %s", ",".join(symbols), exc)
+                return {}
 
         combined: dict[str, Any] = {}
         for start in range(0, len(symbols), cls._SNAPSHOT_BATCH_SIZE):
             batch = symbols[start : start + cls._SNAPSHOT_BATCH_SIZE]
-            payload = fetcher(batch)
+            try:
+                payload = fetcher(batch)
+            except Exception as exc:
+                LOGGER.warning("CMC snapshot batch fetch failed for %s: %s", ",".join(batch), exc)
+                continue
             if not payload:
+                LOGGER.warning("CMC snapshot batch fetch returned empty for %s", ",".join(batch))
                 continue
             batch_by_symbol = cls._by_symbol(payload)
             combined.update(batch_by_symbol)

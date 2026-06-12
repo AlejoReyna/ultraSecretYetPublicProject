@@ -60,6 +60,7 @@ class Guardrails:
         self._daily_loss_pct = 0.0
         self._loss_streak = 0
         self._last_trade_day: datetime | None = None
+        self._last_compliance_trade_day: date | None = None
         self._load_state()
         self._reset_daily_if_needed()
 
@@ -164,17 +165,24 @@ class Guardrails:
             self._loss_streak = 0
         self._save_state()
 
-    def record_compliance_trade(self) -> None:
-        """Count a non-directional compliance trade (e.g. stable-to-stable swap).
+    def record_compliance_trade(self, current_time: datetime | None = None) -> None:
+        """Count a tiny compliance trade that is not a momentum entry.
 
-        Stable symbols are settlement tokens and fail ``assert_tradable_symbol``,
-        but a tiny stable swap is still an on-chain trade for the competition's
-        one-trade-per-day minimum, so it increments the daily counter directly.
+        Compliance swaps may involve settlement tokens that fail
+        ``assert_tradable_symbol``, but they are still on-chain trades for the
+        competition's one-trade-per-day minimum, so the daily counter increments
+        directly.
         """
 
-        self._reset_daily_if_needed()
+        now = current_time or self._now()
+        self._reset_daily_if_needed(now)
         self._daily_trade_count += 1
+        self._last_compliance_trade_day = now.date()
         self._save_state()
+
+    def compliance_trade_recorded_today(self, current_time: datetime | None = None) -> bool:
+        now = current_time or self._now()
+        return self._last_compliance_trade_day == now.date()
 
     def can_open_new_trade(self) -> bool:
         """Return whether a new position may be opened now."""
@@ -245,6 +253,9 @@ class Guardrails:
         if last_trade_day:
             parsed_day = datetime.fromisoformat(str(last_trade_day))
             self._last_trade_day = parsed_day if parsed_day.tzinfo else parsed_day.replace(tzinfo=timezone.utc)
+        last_compliance_trade_day = payload.get("last_compliance_trade_day")
+        if last_compliance_trade_day:
+            self._last_compliance_trade_day = date.fromisoformat(str(last_compliance_trade_day))
 
     def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +266,9 @@ class Guardrails:
             "loss_streak": self._loss_streak,
             "kill_switch": self._kill_switch,
             "last_trade_day": self._last_trade_day.isoformat() if self._last_trade_day else None,
+            "last_compliance_trade_day": (
+                self._last_compliance_trade_day.isoformat() if self._last_compliance_trade_day else None
+            ),
             "portfolio_ath": self._all_time_high_usdc,
             "last_reset_date": self._daily_date.isoformat(),
         }

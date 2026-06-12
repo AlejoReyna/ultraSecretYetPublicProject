@@ -27,6 +27,7 @@ class ExecutionLogger:
         expected_amount_out: float | None = None,
         result: dict[str, Any] | None = None,
         error: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Append one execution record and return it."""
 
@@ -50,6 +51,8 @@ class ExecutionLogger:
             record["approval_hash"] = approval_hash
         if error is not None:
             record["error"] = error
+        if reason is not None:
+            record["reason"] = reason
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
@@ -69,6 +72,7 @@ def log_execution(
     expected_amount_out: float | None = None,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Append an execution record using the configured settings path."""
 
@@ -81,6 +85,7 @@ def log_execution(
         expected_amount_out=expected_amount_out,
         result=result,
         error=error,
+        reason=reason,
     )
 
 

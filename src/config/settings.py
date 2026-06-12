@@ -48,7 +48,7 @@ class Settings(BaseModel):
     max_daily_loss_pct: float = 0.03
     max_slippage_pct: float = 0.01
     drawdown_soft_stop_pct: float = 0.10
-    drawdown_kill_switch_pct: float = 0.15
+    drawdown_kill_switch_pct: float = 0.18
     trailing_stop_pct: float = 0.035
     take_profit_pct: float = 0.08
     base_risk_per_trade_pct: float = 0.0035
@@ -76,8 +76,12 @@ class Settings(BaseModel):
     # 0.2% buffer avoids chasing tiny noisy ticks that can inflate drawdown.
     breakout_lookback_hours: int = 3
     breakout_buffer: float = 0.002
-    # Minimum passing count across the four core entry factors; slippage remains mandatory.
-    min_entry_factors: int = Field(default=4, ge=1, le=4)
+    # Minimum passing count across the three actionable core entry factors;
+    # regime is logged separately and applied as a size modifier.
+    min_entry_factors: int = Field(default=3, ge=1, le=4)
+    # Size multiplier applied when regime is risk-off. 0.5 halves size
+    # (v2 default); 1.0 makes regime informational only.
+    regime_size_multiplier: float = 0.5
     log_level: str = "INFO"
     demo_mode: bool = False
     position_state_path: str = "positions.json"
@@ -219,7 +223,7 @@ def load_settings(dotenv_path: str | None = None) -> Settings:
         "max_daily_loss_pct": _get_float("MAX_DAILY_LOSS_PCT", 0.03),
         "max_slippage_pct": _get_float("MAX_SLIPPAGE_PCT", 0.01),
         "drawdown_soft_stop_pct": _get_float("DRAWDOWN_SOFT_STOP_PCT", 0.10),
-        "drawdown_kill_switch_pct": _get_float("DRAWDOWN_KILL_SWITCH_PCT", 0.15),
+        "drawdown_kill_switch_pct": _get_float("DRAWDOWN_KILL_SWITCH_PCT", 0.18),
         "trailing_stop_pct": _get_float("TRAILING_STOP_PCT", 0.035),
         "take_profit_pct": _get_float("TAKE_PROFIT_PCT", 0.08),
         "base_risk_per_trade_pct": _get_float("BASE_RISK_PER_TRADE_PCT", 0.0035),
@@ -252,6 +256,7 @@ def load_settings(dotenv_path: str | None = None) -> Settings:
         "breakout_lookback_hours": _get_int("BREAKOUT_LOOKBACK_HOURS", 3),
         "breakout_buffer": _get_float("BREAKOUT_BUFFER", 0.002),
         "min_entry_factors": _get_int("MIN_ENTRY_FACTORS", 4),
+        "regime_size_multiplier": _get_float("REGIME_SIZE_MULTIPLIER", 0.5),
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
         "demo_mode": _get_bool("DEMO_MODE", False),
         "position_state_path": os.getenv("POSITION_STATE_PATH", "positions.json"),

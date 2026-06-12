@@ -64,10 +64,10 @@ def test_max_daily_trades_blocks_fourth_trade(tmp_path: Path) -> None:
         guardrails.validate_new_trade("CAKE", 100.0, 10000.0, 0.001)
 
 
-def test_drawdown_kill_switch_triggers_at_twenty_percent(tmp_path: Path) -> None:
+def test_drawdown_kill_switch_triggers_at_eighteen_percent(tmp_path: Path) -> None:
     guardrails = Guardrails(_settings(tmp_path))
     assert guardrails.update_portfolio_value(10000.0) is False
-    assert guardrails.update_portfolio_value(8000.0) is True
+    assert guardrails.update_portfolio_value(8200.0) is True
     assert guardrails.should_kill_switch() is True
 
 

@@ -27,10 +27,10 @@ def _regime(fragility: str = "NONE", reasons: list[str] | None = None) -> Regime
     )
 
 
-def test_kill_switch_at_15_percent_drawdown(tmp_path: Path) -> None:
+def test_kill_switch_at_18_percent_drawdown(tmp_path: Path) -> None:
     guardrails = Guardrails(_settings(tmp_path))
     guardrails.update_ath(100.0)
-    decision = guardrails.evaluate(84.0, _regime())
+    decision = guardrails.evaluate(82.0, _regime())
     assert decision.state == RiskState.KILL_SWITCH
     assert decision.allow_new_entries is False
 
@@ -81,7 +81,7 @@ def test_precedence_kill_over_daily(tmp_path: Path) -> None:
     guardrails = Guardrails(_settings(tmp_path))
     guardrails.update_ath(100.0)
     guardrails.record_trade_result(-0.04)
-    decision = guardrails.evaluate(84.0, _regime())
+    decision = guardrails.evaluate(82.0, _regime())
     assert decision.state == RiskState.KILL_SWITCH
 
 

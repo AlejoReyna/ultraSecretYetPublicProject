@@ -166,18 +166,39 @@ STABLE_TARGET_SYMBOLS: set[str] = {
     "USDC",
     "DAI",
     "USD1",
-    "USDe",
+    "USDE",
     "USDD",
     "TUSD",
     "FDUSD",
-    "USDf",
+    "USDF",
     "FRXUSD",
     "USDF",
     "DUSD",
-    "lisUSD",
+    "LISUSD",
     "XUSD",
     "EURI",
     "FRAX",
+}
+
+MOMENTUM_EXCLUDED: set[str] = {
+    "USDT",
+    "USDC",
+    "DAI",
+    "USD1",
+    "USDE",
+    "TUSD",
+    "FDUSD",
+    "USDD",
+    "FRAX",
+    "FRXUSD",
+    "USDF",
+    "LISUSD",
+    "XUSD",
+    "EURI",
+    "DUSD",
+    "STABLE",
+    "XAUT",
+    "XAUM",
 }
 
 TRADABLE_TARGET_SYMBOLS: list[str] = [
@@ -272,6 +293,15 @@ def is_tradable_symbol(symbol: str) -> bool:
     if key not in TARGET_SYMBOL_BY_KEY:
         return False
     return key not in STABLE_TARGET_SYMBOLS
+
+
+def is_momentum_candidate_symbol(symbol: str) -> bool:
+    """Return whether a symbol may be selected for a momentum entry."""
+
+    key = symbol.strip().upper()
+    if key not in TARGET_SYMBOL_BY_KEY:
+        return False
+    return key not in MOMENTUM_EXCLUDED
 
 
 def is_liquid(token_data: dict[str, object]) -> bool:

@@ -16,6 +16,12 @@ LOGGER = logging.getLogger(__name__)
 _TX_HASH_RE = re.compile(r"0x[a-fA-F0-9]{64}")
 _BSCSCAN_TX_RE = re.compile(r"(https?://(?:www\.)?bscscan\.com/tx/(0x[a-fA-F0-9]{64}))")
 
+# Quotes are read-only and retried every cycle; a hung quote should fail fast
+# instead of stalling the 5-minute loop. Execution keeps a long timeout because
+# it broadcasts on-chain and must wait for confirmation.
+QUOTE_TIMEOUT_SECONDS = 15
+EXEC_TIMEOUT_SECONDS = 120
+
 
 @dataclass(frozen=True)
 class TWAKResult:
@@ -62,7 +68,7 @@ class TWAKInterface:
                 check=False,
                 shell=False,
                 text=True,
-                timeout=120,
+                timeout=QUOTE_TIMEOUT_SECONDS,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             LOGGER.warning("TWAK quote failed for %s -> %s: %s", from_token, to_token, exc)
@@ -277,7 +283,8 @@ class TWAKInterface:
                 "bsc",
                 "--quote-only",
                 "--json",
-            ]
+            ],
+            timeout=QUOTE_TIMEOUT_SECONDS,
         )
         return self._json_payload_from_result(result, "swap-quote")
 
@@ -287,7 +294,7 @@ class TWAKInterface:
         return self._run(["twak", "start"])
 
     @staticmethod
-    def _run(command: list[str]) -> TWAKResult:
+    def _run(command: list[str], timeout: int = EXEC_TIMEOUT_SECONDS) -> TWAKResult:
         try:
             completed = subprocess.run(
                 command,
@@ -295,7 +302,7 @@ class TWAKInterface:
                 check=False,
                 shell=False,
                 text=True,
-                timeout=120,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             command_name = " ".join(command[:3])

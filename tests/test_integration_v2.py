@@ -198,7 +198,7 @@ def test_daily_minimum_compliance_activates(tmp_path: Path) -> None:
         guardrails,
         regime,
         cycle_id=1,
-        now_utc=datetime(2026, 6, 5, 21, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 6, 5, 22, tzinfo=timezone.utc),
         settings=settings,
     )
 
@@ -207,8 +207,62 @@ def test_daily_minimum_compliance_activates(tmp_path: Path) -> None:
     assert decision.reason == "daily_minimum_compliance_risk_off"
 
 
+def test_daily_minimum_swap_uses_minimal_allowlisted_non_bnb_route(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    guardrails = Guardrails(settings)
+
+    class FakeRouter:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def swap_exact_in(self, *args: object, **kwargs: object) -> dict[str, object]:
+            self.calls.append((args, kwargs))
+            return {"tx_hash": "0xabc"}
+
+    router = FakeRouter()
+
+    executed = main_module._ensure_daily_minimum_trade(
+        settings,
+        router,  # type: ignore[arg-type]
+        guardrails,
+        datetime(2026, 6, 5, 22, tzinfo=timezone.utc),
+        100.0,
+    )
+
+    assert executed is True
+    assert router.calls[0][0][:4] == ("USDC", "TWT", 0.5, settings.max_slippage_pct)
+    assert "BNB" not in router.calls[0][0][:2]
+    payload = json.loads(Path(settings.guardrail_state_path).read_text(encoding="utf-8"))
+    assert payload["daily_trade_count"] == 1
+    assert payload["last_compliance_trade_day"] == "2026-06-05"
+
+
+def test_daily_minimum_swap_preserves_portfolio_floor(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    guardrails = Guardrails(settings)
+
+    class FakeRouter:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def swap_exact_in(self, *args: object, **kwargs: object) -> dict[str, object]:
+            self.calls.append((args, kwargs))
+            return {"tx_hash": "0xabc"}
+
+    router = FakeRouter()
+
+    executed = main_module._ensure_daily_minimum_trade(
+        settings,
+        router,  # type: ignore[arg-type]
+        guardrails,
+        datetime(2026, 6, 5, 22, tzinfo=timezone.utc),
+        2.25,
+    )
+
+    assert executed is False
+    assert router.calls == []
+
+
 def test_kill_switch_stops_loop(monkeypatch: Any, tmp_path: Path) -> None:
-    _install_fast_fakes(monkeypatch, tmp_path, portfolio_value=8400.0)
+    _install_fast_fakes(monkeypatch, tmp_path, portfolio_value=8100.0)
     guardrail_path = tmp_path / "guardrail_state.json"
     guardrail_path.write_text(
         json.dumps(

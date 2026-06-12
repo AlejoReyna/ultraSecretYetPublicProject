@@ -24,6 +24,10 @@ class Position:
     trailing_stop_price: float
     take_profit_price: float
     opened_at: datetime
+    # True when the row was rebuilt from on-chain state with synthetic entry
+    # data. Exit levels are re-anchored from live price on the first update
+    # and exits are deferred one cycle (additive field; dashboard Zod ignores it).
+    reconstructed: bool = False
 
 
 class PositionManager:
@@ -74,6 +78,18 @@ class PositionManager:
         normalized = symbol.upper()
         position = self._positions.get(normalized)
         if position is None:
+            return None
+        if position.reconstructed:
+            # First live price for a reconstructed row: re-anchor stops from
+            # the observed price (synthetic entries can be 0, which would
+            # otherwise leave take_profit_price=0 and fire an instant exit),
+            # then defer exit evaluation one cycle.
+            position.highest_price = max(position.highest_price, current_price)
+            position.trailing_stop_price = current_price * (1 - self.settings.trailing_stop_pct)
+            if position.take_profit_price <= 0:
+                position.take_profit_price = current_price * (1 + self.settings.take_profit_pct)
+            position.reconstructed = False
+            self.persist_positions()
             return None
         if current_price > position.highest_price:
             position.highest_price = current_price
@@ -147,6 +163,7 @@ class PositionManager:
             "trailing_stop_price": position.trailing_stop_price,
             "take_profit_price": position.take_profit_price,
             "opened_at": position.opened_at.isoformat(),
+            "reconstructed": position.reconstructed,
         }
 
     @staticmethod
@@ -164,6 +181,7 @@ class PositionManager:
             trailing_stop_price=float(payload["trailing_stop_price"]),
             take_profit_price=float(payload["take_profit_price"]),
             opened_at=opened_at,
+            reconstructed=bool(payload.get("reconstructed", False)),
         )
 
 

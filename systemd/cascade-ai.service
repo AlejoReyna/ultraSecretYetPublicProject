@@ -1,0 +1,31 @@
+[Unit]
+Description=Cascade AI autonomous BSC trading agent (BNB Hack Track 1)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# WorkingDirectory is load-bearing: price_cache.json / volume_cache.json /
+# positions.json / guardrail_state.json are all cwd-relative paths.
+WorkingDirectory=/home/ec2-user/cascade-ai
+EnvironmentFile=/home/ec2-user/cascade-ai/.env
+ExecStart=/home/ec2-user/cascade-ai/.venv/bin/python -m src.main --live
+# Restart=always so the bot survives clean exits and ssh-session deaths,
+# not just crashes. RestartSec keeps gap under one 5-min cycle.
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/ec2-user/cascade-ai/bot_live.log
+StandardError=append:/home/ec2-user/cascade-ai/bot_live.log
+SyslogIdentifier=cascade-ai
+
+[Install]
+WantedBy=multi-user.target
+
+# Install (run on EC2 as ec2-user):
+#   sudo cp /home/ec2-user/cascade-ai/systemd/cascade-ai.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   pgrep -af src.main && pkill -f src.main   # stop the nohup copy first
+#   sudo systemctl enable --now cascade-ai
+#   systemctl status cascade-ai

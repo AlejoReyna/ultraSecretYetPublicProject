@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.config.settings import Settings
-from src.config.tokens import is_liquid, is_tradable_symbol
+from src.config.tokens import is_liquid, is_momentum_candidate_symbol, is_tradable_symbol
 from src.execution.twak_interface import TWAKInterface
 
 if TYPE_CHECKING:
     from src.ml.types import MLContext
 
-CORE_FACTOR_COUNT = 4
+LOGGER = logging.getLogger(__name__)
+
+CORE_FACTOR_COUNT = 3
 TOTAL_FACTOR_COUNT = 6
 
 
@@ -48,6 +51,8 @@ class _CheapCandidate:
     derivatives_risk_clear: bool
     cheap_core_pass_count: int
     true_factor_count_without_slippage: int
+    momentum_1h: float = 0.0
+    momentum_24h: float = 0.0
 
 
 MAX_UNIVERSE_TWAK_QUOTES = 2
@@ -120,6 +125,7 @@ class BreakoutEngine:
         self.twak_interface = twak_interface or TWAKInterface()
         self.price_cache = LocalCache("price_cache.json")
         self.volume_cache = LocalCache("volume_cache.json")
+        self._missing_factor_warnings: set[tuple[str, str]] = set()
 
     def evaluate_token(
         self,
@@ -148,6 +154,15 @@ class BreakoutEngine:
                 true_factor_count=0,
                 reason="symbol outside tradable target allowlist",
             )
+        if not is_momentum_candidate_symbol(symbol):
+            return BreakoutDecision(
+                should_enter=False,
+                symbol=symbol or None,
+                position_size_usdc=0.0,
+                factor_scores={},
+                true_factor_count=0,
+                reason="symbol excluded from momentum candidates",
+            )
 
         candidate = self._evaluate_cheap_candidate(token_data, portfolio_value_usdc)
         estimated_slippage: float | None = None
@@ -164,30 +179,36 @@ class BreakoutEngine:
         """Evaluate all candidate factors that do not require TWAK."""
 
         symbol = str(token_data.get("symbol", "")).upper()
-        position_size = portfolio_value_usdc * self.settings.max_position_pct
         price = self._positive_number(token_data.get("price"))
         volume_24h = self._positive_number(token_data.get("volume_24h"))
         market_cap = self._positive_number(token_data.get("market_cap"))
         rsi = self._positive_number(token_data.get("rsi"))
-        funding_rate = self._nonzero_number(token_data.get("funding_rate"))
-        open_interest_change = self._nonzero_number(token_data.get("open_interest_change_pct"))
+        funding_rate = self._number(token_data.get("funding_rate"))
+        open_interest_change = self._number(token_data.get("open_interest_change_pct"))
 
         volume_breakout = self._volume_breakout(symbol, token_data, volume_24h, market_cap)
 
         six_hour_high_break = self._breakout_high_break(symbol, token_data, price)
 
         regime_not_risk_off = self.check_regime(token_data)
+        position_size = portfolio_value_usdc * self.settings.max_position_pct
+        if not regime_not_risk_off:
+            position_size *= float(getattr(self.settings, "regime_size_multiplier", 0.5))
 
-        rsi_in_range = True
-        if rsi is not None:
+        if rsi is None:
+            self._warn_missing_factor_once(symbol, "rsi_in_range")
+            rsi_in_range = False
+        else:
             rsi_in_range = 55.0 <= rsi <= 75.0
 
-        derivatives_risk_clear = True
-        if funding_rate is not None and open_interest_change is not None:
+        if funding_rate is None or open_interest_change is None:
+            self._warn_missing_factor_once(symbol, "derivatives_risk_clear")
+            derivatives_risk_clear = False
+        else:
             derivatives_risk_clear = not (abs(funding_rate) > 0.0015 or open_interest_change < -10.0)
 
         cheap_core_pass_count = sum(
-            1 for passed in (volume_breakout, six_hour_high_break, regime_not_risk_off) if passed
+            1 for passed in (volume_breakout, six_hour_high_break) if passed
         )
         true_factor_count_without_slippage = sum(
             1
@@ -213,14 +234,20 @@ class BreakoutEngine:
             derivatives_risk_clear=derivatives_risk_clear,
             cheap_core_pass_count=cheap_core_pass_count,
             true_factor_count_without_slippage=true_factor_count_without_slippage,
+            momentum_1h=self._token_change_fraction(token_data, hours=1) or 0.0,
+            momentum_24h=self._token_change_fraction(token_data, hours=24) or 0.0,
         )
 
     def _estimate_candidate_slippage(self, candidate: _CheapCandidate) -> float | None:
-        return self.twak_interface.estimate_slippage_pct(
-            amount=candidate.position_size_usdc,
-            from_token=self.settings.default_stable_symbol,
-            to_token=candidate.symbol,
-        )
+        try:
+            return self.twak_interface.estimate_slippage_pct(
+                amount=candidate.position_size_usdc,
+                from_token=self.settings.default_stable_symbol,
+                to_token=candidate.symbol,
+            )
+        except Exception as exc:
+            LOGGER.warning("TWAK slippage quote failed for %s: %s", candidate.symbol, exc)
+            return None
 
     def _decision_from_candidate(
         self,
@@ -247,7 +274,7 @@ class BreakoutEngine:
         passing_core_count = candidate.cheap_core_pass_count + int(slippage_under_cap)
         true_factor_count = sum(1 for passed in factor_scores.values() if passed)
 
-        min_core = self.settings.min_entry_factors
+        min_core = min(self.settings.min_entry_factors, CORE_FACTOR_COUNT)
         should_enter = passing_core_count >= min_core and slippage_under_cap
 
         if should_enter:
@@ -313,7 +340,7 @@ class BreakoutEngine:
         best_volume = -1.0
         saw_target_symbol = False
         for symbol, token_data in market_snapshot.items():
-            if not is_tradable_symbol(symbol):
+            if not is_tradable_symbol(symbol) or not is_momentum_candidate_symbol(symbol):
                 continue
             saw_target_symbol = True
             enriched_data = {"symbol": symbol.upper(), **token_data}
@@ -327,13 +354,19 @@ class BreakoutEngine:
                 best_decision = unquoted_decision
                 best_volume = candidate.volume_24h
 
+        momentum_scores = self._momentum_z_scores(candidates)
         quote_candidates = sorted(
             (
                 candidate
                 for candidate in candidates
                 if candidate.cheap_core_pass_count >= self._min_cheap_core_for_slippage_quote
             ),
-            key=self._cheap_candidate_rank,
+            key=lambda candidate: (
+                candidate.cheap_core_pass_count,
+                candidate.true_factor_count_without_slippage,
+                momentum_scores.get(candidate.symbol, 0.0),
+                candidate.volume_24h,
+            ),
             reverse=True,
         )
 
@@ -419,18 +452,26 @@ class BreakoutEngine:
         if price is None:
             return False
 
+        cached_high = self.price_cache.get_max_value(
+            symbol,
+            max_age_hours=self.settings.breakout_lookback_hours,
+        )
         high_3h = self._positive_number(token_data.get("high_3h"))
+        high_6h = self._positive_number(token_data.get("high_6h"))
+        reference_high = cached_high if cached_high is not None else high_3h
+        if reference_high is None:
+            reference_high = high_6h
         buffer_multiplier = 1.0 + self.settings.breakout_buffer
-        if high_3h is not None:
-            broke = price > high_3h * buffer_multiplier
-        else:
-            max_price = self.price_cache.get_max_value(
-                symbol,
-                max_age_hours=self.settings.breakout_lookback_hours,
-            )
-            broke = max_price is not None and price > max_price * buffer_multiplier
+        broke = reference_high is not None and price > reference_high * buffer_multiplier
         self.price_cache.add_data_point(symbol, price, max_age_hours=self.settings.breakout_lookback_hours)
         return broke
+
+    def _warn_missing_factor_once(self, symbol: str, factor: str) -> None:
+        key = (symbol.upper(), factor)
+        if key in self._missing_factor_warnings:
+            return
+        self._missing_factor_warnings.add(key)
+        LOGGER.warning("Missing data for %s factor on %s; failing factor closed", factor, symbol)
 
     def check_regime(self, token_data: dict[str, Any], bnb_data: dict[str, Any] | None = None) -> bool:
         bnb_source = bnb_data if bnb_data is not None else token_data
@@ -498,6 +539,34 @@ class BreakoutEngine:
         )
 
     @staticmethod
+    def _momentum_z_scores(candidates: list[_CheapCandidate]) -> dict[str, float]:
+        """Cross-sectional momentum z-score per symbol: z(1h) + 0.5 * z(24h).
+
+        Replaces raw 24h volume as the quote-priority tiebreak so the freshest
+        movers, not just the largest tokens, win the limited TWAK quote slots.
+        Falls back to 0.0 for all symbols when the candidate set is too small
+        or has zero dispersion (volume tiebreak then decides).
+        """
+
+        if len(candidates) < 2:
+            return {}
+
+        def z_scores(values: list[float]) -> list[float]:
+            mean = sum(values) / len(values)
+            variance = sum((value - mean) ** 2 for value in values) / len(values)
+            std = variance**0.5
+            if std <= 0.0:
+                return [0.0] * len(values)
+            return [(value - mean) / std for value in values]
+
+        z_1h = z_scores([candidate.momentum_1h for candidate in candidates])
+        z_24h = z_scores([candidate.momentum_24h for candidate in candidates])
+        return {
+            candidate.symbol: z_1h[index] + 0.5 * z_24h[index]
+            for index, candidate in enumerate(candidates)
+        }
+
+    @staticmethod
     def _is_better_decision(
         candidate: BreakoutDecision,
         candidate_volume: float,
@@ -514,13 +583,6 @@ class BreakoutEngine:
     def _positive_number(value: Any) -> float | None:
         number = BreakoutEngine._number(value)
         if number is None or number <= 0:
-            return None
-        return number
-
-    @staticmethod
-    def _nonzero_number(value: Any) -> float | None:
-        number = BreakoutEngine._number(value)
-        if number is None or number == 0:
             return None
         return number
 

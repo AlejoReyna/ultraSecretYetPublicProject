@@ -84,7 +84,7 @@ def _seed_breakout_caches(engine: BreakoutEngine, symbols: list[str]) -> None:
     }
 
 
-def test_three_of_four_core_factors_enters() -> None:
+def test_three_actionable_core_factors_enters() -> None:
     engine = _engine_with_price_high("CAKE", 10.0)
     decision = engine.evaluate_token(_token(), 10000.0)
 
@@ -94,10 +94,10 @@ def test_three_of_four_core_factors_enters() -> None:
     assert decision.factor_scores["regime_not_risk_off"] is True
     assert decision.factor_scores["slippage_under_cap"] is True
     assert decision.position_size_usdc == 500.0
-    assert "4/4 core factors passed" in decision.reason
+    assert "3/3 core factors passed" in decision.reason
 
 
-def test_four_core_with_missing_rsi_and_derivatives_still_enters() -> None:
+def test_missing_rsi_and_derivatives_fail_optional_factors_but_do_not_veto_core_entry() -> None:
     engine = _engine_with_price_high("CAKE", 10.0)
     decision = engine.evaluate_token(
         _token(rsi=None, funding_rate=None, open_interest_change_pct=None),
@@ -105,8 +105,8 @@ def test_four_core_with_missing_rsi_and_derivatives_still_enters() -> None:
     )
 
     assert decision.should_enter is True
-    assert decision.factor_scores["rsi_in_range"] is True
-    assert decision.factor_scores["derivatives_risk_clear"] is True
+    assert decision.factor_scores["rsi_in_range"] is False
+    assert decision.factor_scores["derivatives_risk_clear"] is False
 
 
 def test_stablecoin_targets_are_not_directional_entries() -> None:
@@ -205,7 +205,7 @@ def test_missing_or_zero_data_fails_closed() -> None:
 
     assert decision.factor_scores["volume_breakout"] is False
     assert decision.factor_scores["regime_not_risk_off"] is False
-    assert decision.factor_scores["rsi_in_range"] is True
+    assert decision.factor_scores["rsi_in_range"] is False
     assert decision.factor_scores["slippage_under_cap"] is False
     assert decision.factor_scores["derivatives_risk_clear"] is True
     assert decision.should_enter is False
@@ -287,8 +287,8 @@ def test_insufficient_core_factors_reports_count() -> None:
     assert decision.should_enter is False
     assert decision.reason in {
         "slippage estimate missing, negative, or above cap",
-        "insufficient signal: 0/4 core factors passed (need 4)",
-        "insufficient signal: 1/4 core factors passed (need 4)",
+        "insufficient signal: 0/3 core factors passed (need 3)",
+        "insufficient signal: 1/3 core factors passed (need 3)",
     }
 
 
@@ -373,7 +373,9 @@ def test_volume_breakout_derives_hourly_average_from_24h_when_needed() -> None:
 
 def test_three_hour_breakout_uses_cmc_high_3h_with_buffer_when_present() -> None:
     engine = _engine()
+    engine.price_cache.data = {}
     passing = engine.evaluate_token(_token(price=2.11, high_3h=2.10), 10000.0)
+    engine.price_cache.data = {}
     failing = engine.evaluate_token(_token(price=2.104, high_3h=2.10), 10000.0)
 
     assert passing.factor_scores["six_hour_high_break"] is True
@@ -405,12 +407,13 @@ def test_flat_bnb_regime_is_not_risk_off() -> None:
     assert decision.should_enter is True
 
 
-def test_bnb_regime_blocks_drops_worse_than_one_percent() -> None:
+def test_bnb_regime_risk_off_halves_size_without_veto() -> None:
     engine = _engine_with_price_high("CAKE", 10.0)
     decision = engine.evaluate_token(_token(bnb_1h_trend_pct=-1.1), 10000.0)
 
     assert decision.factor_scores["regime_not_risk_off"] is False
-    assert decision.should_enter is False
+    assert decision.should_enter is True
+    assert decision.position_size_usdc == 250.0
 
 
 def test_token_regime_requires_positive_1h_and_24h_guard() -> None:
@@ -435,7 +438,7 @@ def test_regime_accepts_explicit_separate_bnb_data() -> None:
     ) is False
 
 
-def test_min_entry_factors_requires_all_four_core_factors() -> None:
+def test_regime_factor_does_not_count_against_min_entry_factors() -> None:
     engine = _engine_with_price_high("CAKE", 10.0)
     decision = engine.evaluate_token(
         _token(bnb_1h_trend_pct=-5.0, volume_24h=10_000_000.0),
@@ -443,7 +446,8 @@ def test_min_entry_factors_requires_all_four_core_factors() -> None:
     )
 
     assert decision.factor_scores["regime_not_risk_off"] is False
-    assert decision.should_enter is False
+    assert decision.should_enter is True
+    assert decision.position_size_usdc == 250.0
 
 
 def test_min_entry_factors_three_allows_one_missing_core_when_configured() -> None:
@@ -455,3 +459,23 @@ def test_min_entry_factors_three_allows_one_missing_core_when_configured() -> No
     )
 
     assert decision.should_enter is True
+
+
+def test_gold_tokens_are_excluded_from_momentum_candidates() -> None:
+    engine = _engine_with_price_high("CAKE", 10.0)
+    engine.price_cache.data["XAUT"] = [{"timestamp": time.time(), "value": 3000.0}]
+    snapshot = {
+        "XAUT": _token(
+            symbol="XAUT",
+            price=3100.0,
+            volume_24h=1_000_000_000.0,
+            market_cap=10_000_000_000.0,
+            funding_rate=0.0,
+            open_interest_change_pct=0.0,
+        ),
+        "CAKE": _token(funding_rate=0.0, open_interest_change_pct=0.0),
+    }
+
+    decision = engine.evaluate_universe(snapshot, 10000.0)
+
+    assert decision.symbol == "CAKE"
