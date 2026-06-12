@@ -12,6 +12,13 @@ build/
 htmlcov/
 positions.json
 guardrail_state.json
+logs/
+agent.log
+decision_log.jsonl
+execution_log.jsonl
+price_cache.json
+volume_cache.json
+.DS_Store
 artifacts/*
 !artifacts/.gitkeep
 test_agentkit.py
