@@ -594,6 +594,8 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                 guardrails,
                 datetime.now(timezone.utc),
                 portfolio_value,
+                twak_interface=twak_interface,
+                liquidity_analyzer=liquidity_analyzer,
             )
             if settings.demo_mode:
                 _print_demo_cycle_summary(
@@ -703,6 +705,8 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             guardrails,
             datetime.now(timezone.utc),
             portfolio_value,
+            twak_interface=twak_interface,
+            liquidity_analyzer=liquidity_analyzer,
         ):
             action = "ENTER"
             decision_reasons.append("compliance: daily minimum trade")
@@ -2408,6 +2412,9 @@ def _ensure_daily_minimum_trade(
     guardrails: Guardrails,
     now_utc: datetime,
     portfolio_value_usdc: float,
+    *,
+    twak_interface: TWAKInterface | None = None,
+    liquidity_analyzer: LiquidityAnalyzer | None = None,
 ) -> bool:
     """Fail-safe for the competition's one-trade-per-UTC-day minimum.
 
@@ -2442,6 +2449,26 @@ def _ensure_daily_minimum_trade(
     if "BNB" in {stable, counter}:
         LOGGER.error("Compliance minimum trade refused because BNB would be used as a leg")
         return False
+    if twak_interface is not None and liquidity_analyzer is not None:
+        try:
+            slippage_normal = twak_interface.estimate_slippage_pct(amount_in, stable, counter)
+            slippage_small = twak_interface.estimate_slippage_pct(amount_in / 2, stable, counter)
+            liquidity = liquidity_analyzer.analyze_liquidity(
+                symbol=counter,
+                position_usd=amount_in,
+                twak_quote_small=slippage_small,
+                twak_quote_normal=slippage_normal,
+                max_slippage_pct=_require_execution_slippage(settings.max_slippage_pct),
+            )
+        except Exception as exc:
+            LOGGER.error("Compliance minimum trade liquidity check failed; will retry next cycle: %s", exc)
+            return False
+        if getattr(liquidity, "recommendation", "") == "REJECT":
+            LOGGER.warning(
+                "Skipping compliance minimum trade: %s route liquidity recommendation is REJECT",
+                counter,
+            )
+            return False
     try:
         result = _execute_logged_swap(
             settings,
