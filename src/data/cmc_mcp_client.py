@@ -209,6 +209,21 @@ class CmcMcpClient:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(parsed, dict):
+                    # Paid id-only responses arrive columnar:
+                    # {"headers": [...], "rows": [[...], ...]} (probed June 12).
+                    headers = parsed.get("headers")
+                    rows = parsed.get("rows")
+                    if isinstance(headers, list) and isinstance(rows, list):
+                        by_symbol: dict[str, Any] = {}
+                        for row in rows:
+                            if not isinstance(row, list):
+                                continue
+                            record = dict(zip(headers, row))
+                            symbol = str(record.get("symbol") or "").strip().upper()
+                            if symbol:
+                                by_symbol[symbol] = record
+                        if by_symbol:
+                            return {"data": by_symbol}
                     return parsed
                 if isinstance(parsed, list):
                     by_symbol: dict[str, Any] = {}
@@ -342,14 +357,23 @@ class CMCMCPClient:
             return {}
         return self._snapshot_from_quotes(normalized_symbols, quotes)
 
-    def fetch_x402_enriched_snapshot(self, symbols: list[str]) -> dict[str, Any]:
-        """Fetch paid x402 quotes plus free keyless derivatives and market metrics."""
+    def fetch_x402_enriched_snapshot(
+        self,
+        symbols: list[str],
+        id_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch paid x402 quotes plus free keyless derivatives and market metrics.
+
+        ``id_overrides`` maps SYMBOL -> CMC id, typically harvested from the
+        fresh keyless snapshot, so unpinned symbols can still be queried by id
+        (the paid MCP tool rejects symbol-only requests: "id: Required").
+        """
 
         normalized_symbols = self._normalize_target_symbols(symbols)
         if not normalized_symbols:
             return {}
 
-        quotes = self._fetch_x402_quotes_id_preferred(normalized_symbols)
+        quotes = self._fetch_x402_quotes_id_preferred(normalized_symbols, id_overrides)
         if not quotes:
             LOGGER.warning("x402 quotes unavailable; skipping enriched snapshot")
             return {}
@@ -398,38 +422,46 @@ class CMCMCPClient:
                 merged.update(data)  # id-based results override ticker results
         return {"data": merged}
 
-    def _fetch_x402_quotes_id_preferred(self, symbols: list[str]) -> dict[str, Any]:
-        """Fetch paid x402 quotes by CMC id when pinned, by ticker otherwise.
+    def _fetch_x402_quotes_id_preferred(
+        self,
+        symbols: list[str],
+        id_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch paid x402 quotes, always by CMC id.
 
-        Mirrors ``_fetch_keyless_id_preferred``: ticker lookups can resolve to
-        knockoff listings, and we never want to pay $0.01 for knockoff data.
-        Partitioning before batching keeps each paid call unambiguous (id-only
-        or ticker-only, never both) at the cost of at most one extra paid call
-        per refresh when the universe mixes pinned and unpinned symbols.
+        Probed June 12: the paid MCP tool REJECTS symbol-only requests
+        ("id: Required parameter is missing") while still settling the
+        payment, so ticker-based paid calls are never made. Id resolution
+        order: pinned UCID (CMC_IDS_BY_SYMBOL) > id harvested from the fresh
+        keyless snapshot (id_overrides). Symbols with no known id are skipped
+        on the paid layer — the free keyless layer still covers them.
         """
 
-        with_id = [s for s in symbols if resolve_cmc_coin_id(s)]
-        without_id = [s for s in symbols if not resolve_cmc_coin_id(s)]
-        merged: dict[str, Any] = {}
-        if without_id:
-            payload = self._fetch_combined_payload(without_id, self._fetch_x402_quotes_by_symbol)
-            merged.update(self._by_symbol(payload))
-        if with_id:
-            payload = self._fetch_combined_payload(with_id, self._fetch_x402_quotes_by_id)
-            merged.update(self._by_symbol(payload))  # id-based results win
-        return merged
+        overrides = {k.upper(): str(v) for k, v in (id_overrides or {}).items()}
+        resolved: dict[str, str] = {}
+        skipped: list[str] = []
+        for symbol in symbols:
+            key = symbol.upper()
+            cmc_id = resolve_cmc_coin_id(key) or overrides.get(key)
+            if cmc_id:
+                resolved[key] = str(cmc_id)
+            else:
+                skipped.append(key)
+        if skipped:
+            LOGGER.debug(
+                "Paid x402 skipping %d symbols with no known CMC id: %s",
+                len(skipped),
+                ",".join(sorted(skipped)),
+            )
+        if not resolved:
+            return {}
 
-    def _fetch_x402_quotes_by_id(self, symbols: list[str]) -> dict[str, Any]:
-        return self._call_tool_x402(
-            "get_crypto_quotes_latest",
-            {"id": self._symbols_to_id_arg(symbols)},
-        )
+        def _fetch_batch(batch: list[str]) -> dict[str, Any]:
+            ids = list(dict.fromkeys(resolved[s] for s in batch))
+            return self._call_tool_x402("get_crypto_quotes_latest", {"id": ",".join(ids)})
 
-    def _fetch_x402_quotes_by_symbol(self, symbols: list[str]) -> dict[str, Any]:
-        return self._call_tool_x402(
-            "get_crypto_quotes_latest",
-            {"symbol": self._symbols_to_symbol_arg(symbols)},
-        )
+        payload = self._fetch_combined_payload(list(resolved), _fetch_batch)
+        return self._by_symbol(payload)
 
     def _build_enriched_snapshot(
         self,

@@ -343,7 +343,12 @@ def test_fetch_x402_enriched_snapshot_merges_x402_quotes_and_keyless_metrics(mon
     assert snapshot["CAKE"]["percent_change_1h"] == 0.3
 
 
-def test_fetch_x402_enriched_snapshot_splits_paid_id_and_symbol_calls(monkeypatch: Any) -> None:
+def test_fetch_x402_enriched_snapshot_paid_calls_are_id_only(monkeypatch: Any) -> None:
+    """Probed June 12: the paid tool rejects symbol-only requests after
+    settling payment, and id-only responses arrive columnar (headers+rows).
+    Pinned UCIDs and keyless-harvested id_overrides merge into one id-only
+    call; symbols with no known id are skipped on the paid layer."""
+
     class PaidX402Client:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -351,28 +356,19 @@ def test_fetch_x402_enriched_snapshot_splits_paid_id_and_symbol_calls(monkeypatc
         def request_with_x402(self, method: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
             arguments = payload["params"]["arguments"]
             self.calls.append(arguments)
-            if "symbol" in arguments:
-                return {
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    '{"data":{"AB":{"symbol":"AB","price":1.0,"volume_24h":1000000.0},'
-                                    '"CAKE":{"symbol":"CAKE","price":0.1,"volume_24h":1000000.0}}}'
-                                ),
-                            }
-                        ]
-                    }
-                }
+            assert "symbol" not in arguments, "paid path must never send symbol args"
             return {
                 "result": {
                     "content": [
                         {
                             "type": "text",
-                            "text": '{"data":{"CAKE":{"symbol":"CAKE","price":2.5,"volume_24h":5000000.0}}}',
+                            "text": (
+                                '{"headers":["id","symbol","price","volume_24h"],'
+                                '"rows":[["7186","CAKE",2.5,5000000.0],["12345","AB",1.0,1000000.0]]}'
+                            ),
                         }
-                    ]
+                    ],
+                    "isError": False,
                 }
             }
 
@@ -383,11 +379,18 @@ def test_fetch_x402_enriched_snapshot_splits_paid_id_and_symbol_calls(monkeypatc
     monkeypatch.setattr(requests, "get", fake_get)
     client = CMCMCPClient(Settings(use_keyless_primary=False), x402_client=paid)  # type: ignore[arg-type]
 
-    snapshot = client.fetch_x402_enriched_snapshot(["CAKE", "AB"])
+    # CAKE pinned (7186); AB unpinned but harvested from keyless; ZZZ unknown -> skipped
+    snapshot = client.fetch_x402_enriched_snapshot(
+        ["CAKE", "AB", "ZZZ"],
+        id_overrides={"AB": "12345"},
+    )
 
-    assert paid.calls == [{"symbol": "AB"}, {"id": "7186"}]
+    assert len(paid.calls) == 1
+    requested_ids = set(paid.calls[0]["id"].split(","))
+    assert requested_ids == {"7186", "12345"}
     assert snapshot["AB"]["price"] == 1.0
     assert snapshot["CAKE"]["price"] == 2.5
+    assert "ZZZ" not in snapshot
 
 
 def test_fetch_x402_enriched_snapshot_returns_empty_when_budget_blocks_payment(monkeypatch: Any) -> None:

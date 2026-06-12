@@ -43,9 +43,14 @@ class DualFakeCMCClient:
             "CAKE": {"symbol": "CAKE", "price": 1.0, "volume_24h": 1000.0}
         }
 
-    def fetch_x402_enriched_snapshot(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+    def fetch_x402_enriched_snapshot(
+        self,
+        symbols: list[str],
+        id_overrides: dict[str, str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         self.x402_calls += 1
         self.x402_symbols.append(list(symbols))
+        self.last_id_overrides = dict(id_overrides or {})
         return {
             "CAKE": {"symbol": "CAKE", "price": 1.0, "rsi": 60.0, "estimated_slippage_pct": 0.002}
         }

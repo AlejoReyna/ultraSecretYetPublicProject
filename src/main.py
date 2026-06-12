@@ -1699,10 +1699,18 @@ def _fetch_snapshot(
             settings,
         )
 
+        # The paid MCP tool requires CMC ids (symbol-only requests are
+        # rejected after settling payment). Harvest ids for unpinned symbols
+        # from the fresh keyless rows so the paid layer can cover them.
+        id_overrides: dict[str, str] = {}
+        for sym, row in keyless_snapshot.items():
+            if isinstance(row, dict) and row.get("id") is not None:
+                id_overrides[str(sym).upper()] = str(row["id"])
+
         snapshot = cache.get_merged_snapshot(
             x402_ttl,
             keyless_ttl,
-            lambda: cmc_client.fetch_x402_enriched_snapshot(enrich_symbols),
+            lambda: cmc_client.fetch_x402_enriched_snapshot(enrich_symbols, id_overrides),
             _fetch_keyless,
             force_x402_refresh=force_x402,
         )

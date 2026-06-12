@@ -23,7 +23,11 @@ class DualFakeCMCClient:
         self.x402_calls = 0
         self.keyless_calls = 0
 
-    def fetch_x402_enriched_snapshot(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+    def fetch_x402_enriched_snapshot(
+        self,
+        symbols: list[str],
+        id_overrides: dict[str, str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         self.x402_calls += 1
         return {
             "CAKE": {
