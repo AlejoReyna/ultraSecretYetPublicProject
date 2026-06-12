@@ -1703,7 +1703,13 @@ def _reconstruct_positions_from_balances(
     for symbol in TRADABLE_TARGET_SYMBOLS:
         if not has_verified_bsc_contract(symbol):
             continue
-        balance_response = toolkit.get_balance(symbol)
+        try:
+            balance_response = toolkit.get_balance(symbol)
+        except Exception as exc:
+            # One bad contract address or RPC hiccup must never kill startup;
+            # skip the symbol and keep reconstructing the rest of the wallet.
+            LOGGER.warning("Balance read failed for %s during reconstruction; skipping: %s", symbol, exc)
+            continue
         amount_tokens = _extract_symbol_balance(balance_response, symbol)
         if amount_tokens <= 0:
             continue
