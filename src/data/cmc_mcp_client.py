@@ -642,13 +642,10 @@ class CMCMCPClient:
 
         if self.settings.use_keyless_primary:
             keyless_data = self._fetch_keyless(tool_name, arguments)
-            if self._x402_shadow_enabled() and self.spend_governor.allow_call():
-                try:
-                    self.x402_client.request_with_x402("POST", envelope, headers=headers)
-                    self.spend_governor.record_spend()
-                except Exception as exc:
-                    LOGGER.warning("x402 SDK shadow request failed: %s", exc)
-                    self.spend_governor.record_failure()
+            # SHADOW REMOVED (budget fix 2026-06-13): this block fired an extra
+            # PAID x402 call per keyless fetch and discarded the result, bypassing
+            # CMC_SNAPSHOT_TTL_SECONDS and burning the daily budget on the 5-min
+            # keyless cycle. The legitimate paid path is _call_tool_x402 (TTL-gated).
             return keyless_data
 
         if not self.spend_governor.allow_call():
