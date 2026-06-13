@@ -72,7 +72,9 @@ LIVE_WINDOW_END_DAY = 28
 PREFLIGHT_QUOTE_AMOUNT_USDC = 0.5
 COMPLIANCE_TRADE_USDC = 0.5
 COMPLIANCE_TRIGGER_HOUR_UTC = 22
-MIN_PORTFOLIO_RETAINED_USDC = 2.0
+# Floor removed per competition config: deploy effectively the full balance
+# (entry sizing leaves a small buffer via SCALPING_POSITION_PCT).
+MIN_PORTFOLIO_RETAINED_USDC = 0.0
 COMPLIANCE_TO_SYMBOL = "TWT"
 SCHEMA_VERSION = "2.6.0"
 
