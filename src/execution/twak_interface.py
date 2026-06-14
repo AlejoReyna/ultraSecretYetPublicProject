@@ -8,9 +8,23 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Optional
 
 from src.config.tokens import TOKEN_CONTRACTS, resolve_twak_token
+
+
+def _format_amount_for_cli(amount: float) -> str:
+    """Render a swap amount as a plain decimal string for the TWAK CLI.
+
+    ``str(6.23e-05)`` yields ``"6.2303634196258e-05"`` (scientific notation),
+    which the TWAK CLI cannot parse and rejects with
+    ``Cannot convert ...e-050 to a BigInt`` — silently breaking exits of any
+    token quantity below 1e-4 (e.g. small ETH/BTC positions). Formatting via
+    ``Decimal`` avoids the exponent while preserving full precision.
+    """
+
+    return format(Decimal(str(amount)), "f")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +83,7 @@ class TWAKInterface:
         command = [
             "twak",
             "swap",
-            str(amount),
+            _format_amount_for_cli(amount),
             from_addr,
             to_addr,
             "--chain",
@@ -259,7 +273,7 @@ class TWAKInterface:
         command = [
             "twak",
             "swap",
-            str(amount),
+            _format_amount_for_cli(amount),
             resolve_twak_token(from_symbol),
             resolve_twak_token(to_symbol),
             "--slippage",
@@ -289,7 +303,7 @@ class TWAKInterface:
             [
                 "twak",
                 "swap",
-                str(amount),
+                _format_amount_for_cli(amount),
                 resolve_twak_token(from_symbol),
                 resolve_twak_token(to_symbol),
                 "--slippage",

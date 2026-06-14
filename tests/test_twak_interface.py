@@ -6,7 +6,39 @@ from typing import Any
 
 import pytest
 
-from src.execution.twak_interface import TWAKInterface, TWAKResult
+from src.execution.twak_interface import (
+    TWAKInterface,
+    TWAKResult,
+    _format_amount_for_cli,
+)
+
+
+def test_format_amount_for_cli_avoids_scientific_notation() -> None:
+    # Tiny amounts must NOT render as "6.23e-05" (the TWAK CLI rejects the
+    # exponent with "Cannot convert ...e-050 to a BigInt").
+    assert _format_amount_for_cli(6.2303634196258e-05) == "0.000062303634196258"
+    assert "e" not in _format_amount_for_cli(1e-18).lower()
+    # Normal and large amounts round-trip unchanged.
+    assert _format_amount_for_cli(0.6065141387360113) == "0.6065141387360113"
+    assert _format_amount_for_cli(110228.37366) == "110228.37366"
+
+
+def test_swap_sends_plain_decimal_amount_for_tiny_position(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        captured["command"] = command
+        return type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": '{"hash":"0x' + "a" * 64 + '"}', "stderr": ""},
+        )()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    TWAKInterface().swap("ETH", "USDC", 6.2303634196258e-05, 0.01)
+    amount_arg = captured["command"][2]  # ["twak","swap",<amount>,...]
+    assert "e" not in amount_arg.lower()
+    assert amount_arg == "0.000062303634196258"
 
 
 def test_swap_uses_current_twak_positional_command(monkeypatch: Any) -> None:
