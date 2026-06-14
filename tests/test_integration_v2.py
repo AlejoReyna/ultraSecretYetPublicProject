@@ -236,6 +236,49 @@ def test_daily_minimum_swap_uses_minimal_allowlisted_non_bnb_route(tmp_path: Pat
     assert payload["last_compliance_trade_day"] == "2026-06-05"
 
 
+def test_daily_minimum_swap_skipped_when_counter_blacked_out(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from src.strategy.event_filter import EventRiskFilter
+
+    settings = _settings(tmp_path)
+    guardrails = Guardrails(settings)
+
+    class FakeRouter:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def swap_exact_in(self, *args: object, **kwargs: object) -> dict[str, object]:
+            self.calls.append((args, kwargs))
+            return {"tx_hash": "0xabc"}
+
+    router = FakeRouter()
+    now = datetime(2026, 6, 5, 22, tzinfo=timezone.utc)
+    # TWT (COMPLIANCE_TO_SYMBOL) faces an event within the blackout horizon.
+    events_path = tmp_path / "events.json"
+    events_path.write_text(
+        json.dumps({"events": [{
+            "symbol": "TWT", "event_type": "unlock",
+            "scheduled_time": (now + timedelta(hours=1)).isoformat(),
+            "severity": 5,
+        }]}),
+        encoding="utf-8",
+    )
+    event_filter = EventRiskFilter(events_path=events_path, control_file=tmp_path / "HALT")
+    event_filter.load(strict=True)
+
+    executed = main_module._ensure_daily_minimum_trade(
+        settings,
+        router,  # type: ignore[arg-type]
+        guardrails,
+        now,
+        100.0,
+        event_filter=event_filter,
+    )
+
+    assert executed is False
+    assert router.calls == []
+
+
 def test_daily_minimum_swap_preserves_portfolio_floor(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     guardrails = Guardrails(settings)

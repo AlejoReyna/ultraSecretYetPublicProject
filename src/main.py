@@ -711,6 +711,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     portfolio_value,
                     twak_interface=twak_interface,
                     liquidity_analyzer=liquidity_analyzer,
+                    event_filter=event_filter,
                 )
             if settings.demo_mode:
                 _print_demo_cycle_summary(
@@ -871,6 +872,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             portfolio_value,
             twak_interface=twak_interface,
             liquidity_analyzer=liquidity_analyzer,
+            event_filter=event_filter,
         ):
             action = "ENTER"
             decision_reasons.append("compliance: daily minimum trade")
@@ -2637,6 +2639,7 @@ def _ensure_daily_minimum_trade(
     *,
     twak_interface: TWAKInterface | None = None,
     liquidity_analyzer: LiquidityAnalyzer | None = None,
+    event_filter: EventRiskFilter | None = None,
 ) -> bool:
     """Fail-safe for the competition's one-trade-per-UTC-day minimum.
 
@@ -2671,6 +2674,20 @@ def _ensure_daily_minimum_trade(
     if "BNB" in {stable, counter}:
         LOGGER.error("Compliance minimum trade refused because BNB would be used as a leg")
         return False
+    # RWEAL: never route the fixed compliance swap into a token facing a
+    # scheduled event. COMPLIANCE_TO_SYMBOL is hardcoded, so without this guard a
+    # blacked-out counter (e.g. TWT) would be bought directly into the event.
+    # Skipping is the conservative choice; the operator is warned to pick an
+    # unaffected COMPLIANCE_TO_SYMBOL if disqualification risk is a concern.
+    if event_filter is not None:
+        _blocked = event_filter.symbol_blackout(counter, now_utc)
+        if _blocked:
+            LOGGER.warning(
+                "Skipping fixed compliance swap: counter %s blacked out (%s)",
+                counter,
+                _blocked,
+            )
+            return False
     if twak_interface is not None and liquidity_analyzer is not None:
         try:
             slippage_normal = twak_interface.estimate_slippage_pct(amount_in, stable, counter)
