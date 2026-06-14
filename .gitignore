@@ -2,6 +2,11 @@
 src/config/secrets.py
 __pycache__/
 *.pyc
+
+# RWEAL runtime files (operator-local): live calendar + manual halt switch.
+# Commit events.example.json as the template instead.
+events.json
+TRADING_HALT
 .pytest_cache/
 .venv/
 venv/

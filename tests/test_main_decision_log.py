@@ -218,6 +218,30 @@ def test_run_agent_logs_guardrail_blocked_cycle(monkeypatch: Any, tmp_path: Path
     assert record["entries_blocked_reason"] == "daily_trade_limit"
 
 
+def test_reduced_risk_daily_trade_limit_reason_is_specific(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    guardrails = main_module.Guardrails(settings)
+    guardrails._daily_trade_count = 1
+    decision = main_module.RiskDecision(
+        state=main_module.RiskState.REDUCED_RISK,
+        allow_new_entries=True,
+        position_multiplier=0.5,
+        max_slippage_pct=0.005,
+        max_daily_trades=1,
+        base_risk_per_trade_pct=0.00175,
+        reasons=["drawdown_soft_stop"],
+    )
+
+    reason = main_module._entries_blocked_reason(
+        guardrails,
+        decision,
+        portfolio_value=10000.0,
+        settings=settings,
+    )
+
+    assert reason == "reduced_risk_daily_trade_limit"
+
+
 def test_run_agent_logs_drawdown_halt_cycle(monkeypatch: Any, tmp_path: Path) -> None:
     guardrail_path = tmp_path / "guardrail_state.json"
     guardrail_path.write_text(

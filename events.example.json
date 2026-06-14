@@ -1,0 +1,26 @@
+{
+  "version": "1.0",
+  "competition_window": {
+    "start_utc": "2026-06-20T00:00:00Z",
+    "end_utc": "2026-06-27T00:00:00Z"
+  },
+  "events": [
+    {
+      "symbol": "CAKE",
+      "event_type": "unlock",
+      "scheduled_time": "2026-06-22T14:00:00Z",
+      "severity": 5,
+      "direction_bias": "negative",
+      "description": "Team cliff unlock: 15M tokens"
+    },
+    {
+      "symbol": "GLOBAL",
+      "event_type": "macro",
+      "scheduled_time": "2026-06-25T12:30:00Z",
+      "severity": 4,
+      "direction_bias": "neutral",
+      "description": "US CPI release",
+      "blackout_minutes": 30
+    }
+  ]
+}

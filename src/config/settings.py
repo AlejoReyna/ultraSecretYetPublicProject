@@ -159,6 +159,19 @@ class Settings(BaseModel):
     min_bnb_gas: float = 0.05
     min_usdc_balance: float = 50.0
     disk_guard_min_free_bytes: int = 500_000_000
+    # RWEAL Phase 1 (Real-World Event Awareness Layer): static, entry-only
+    # event gate. Disabled by default -> zero behaviour change. See
+    # src/strategy/event_filter.py.
+    enable_rweal: bool = False
+    rweal_events_path: str = "events.json"
+    # Presence of this file on disk = manual full-stop (blocks ALL entries and
+    # the daily-minimum compliance trade). Absence = normal operation.
+    rweal_control_file: str = "TRADING_HALT"
+    # How long before a scheduled event entries are blocked (hours).
+    rweal_blackout_horizon_hours: float = 6.0
+    # How long after a scheduled event entries stay blocked (minutes), unless
+    # the event carries its own symmetric blackout_minutes window.
+    rweal_post_event_minutes: int = 60
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -364,6 +377,11 @@ def load_settings(dotenv_path: str | None = None) -> Settings:
         "min_bnb_gas": _get_float("MIN_BNB_GAS", 0.05),
         "min_usdc_balance": _get_float("MIN_USDC_BALANCE", 50.0),
         "disk_guard_min_free_bytes": _get_int("DISK_GUARD_MIN_FREE_BYTES", 500_000_000),
+        "enable_rweal": _get_bool("ENABLE_RWEAL", False),
+        "rweal_events_path": os.getenv("RWEAL_EVENTS_PATH", "events.json"),
+        "rweal_control_file": os.getenv("RWEAL_CONTROL_FILE", "TRADING_HALT"),
+        "rweal_blackout_horizon_hours": _get_float("RWEAL_BLACKOUT_HORIZON_HOURS", 6.0),
+        "rweal_post_event_minutes": _get_int("RWEAL_POST_EVENT_MINUTES", 60),
     }
     mode = str(values.get("strategy_mode", "breakout")).strip().lower()
     if mode not in {"breakout", "scalping"}:

@@ -54,6 +54,7 @@ from src.strategy.candidate_adapter import (
     decimal_div as _decimal_div,
 )
 from src.strategy.entry_types import EntryCandidate
+from src.strategy.event_filter import EventRiskFilter
 from src.strategy.factory import create_strategy_bundle, fallback_evaluate_universe
 
 _fallback_scorer = importlib.import_module("src.strategy.6falgorithm.fallback_scorer")
@@ -524,14 +525,42 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
     if pending_swap_cooldowns:
         LOGGER.warning("Pending swap cooldown symbols: %s", sorted(pending_swap_cooldowns))
 
+    # RWEAL Phase 1: static, entry-only event gate. Built once; disabled by
+    # default. from_settings() raises on a present-but-malformed events file so a
+    # bad calendar fails fast at startup rather than silently going blind.
+    event_filter: EventRiskFilter | None = None
+    if settings.enable_rweal:
+        event_filter = EventRiskFilter.from_settings(settings)
+        LOGGER.info("RWEAL enabled (entry gate + manual halt file: %s)", settings.rweal_control_file)
+
     running = True
     cycles_completed = 0
     previous_risk_state: RiskState | None = None
     breakout_near_miss_cooldowns: dict[str, int] = {}
+    # Rising-edge tracker so a mid-sleep manual halt re-evaluates promptly
+    # without busy-looping the (expensive) main cycle while halted.
+    _rweal_halt_was_active = False
 
     def _stop(_signum: int, _frame: Any) -> None:
         nonlocal running
         running = False
+
+    def _interruptible_sleep() -> None:
+        """Sleep one loop interval, waking every 1s. If the RWEAL manual halt
+        file appears mid-sleep, break early so the next cycle blocks entries
+        within seconds (default LOOP_SECONDS would otherwise lag up to 300s)."""
+
+        nonlocal _rweal_halt_was_active
+        sleep_until = time.monotonic() + settings.loop_seconds
+        while running and time.monotonic() < sleep_until:
+            if event_filter is not None and event_filter.manual_halt_active():
+                if not _rweal_halt_was_active:
+                    _rweal_halt_was_active = True
+                    LOGGER.warning("RWEAL manual halt detected mid-sleep; re-evaluating now")
+                    break
+            else:
+                _rweal_halt_was_active = False
+            time.sleep(min(1.0, sleep_until - time.monotonic()))
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
@@ -604,6 +633,22 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             entries_allowed = False
             entries_blocked_reason = "disk_guard_free_space_below_threshold"
             decision_reasons_pre.append("disk guard: free space below threshold")
+        # RWEAL Phase 1 global gate. Manual halt = full stop (also suppresses the
+        # daily-minimum compliance trade, below). Global event blackout blocks
+        # discretionary entries but leaves the compliance backstop running.
+        rweal_manual_halt = False
+        if event_filter is not None:
+            rweal_manual_halt = event_filter.manual_halt_active()
+            if rweal_manual_halt:
+                entries_allowed = False
+                entries_blocked_reason = "rweal_manual_halt"
+                decision_reasons_pre.append("RWEAL: manual trading halt active")
+            else:
+                _rweal_global = event_filter.global_blackout(now_utc)
+                if _rweal_global:
+                    entries_allowed = False
+                    entries_blocked_reason = "rweal_event_blackout_global"
+                    decision_reasons_pre.append(f"RWEAL: {_rweal_global}")
         decision_reasons = list(risk_decision.reasons) + decision_reasons_pre
         cycle_status = "ok"
 
@@ -650,16 +695,24 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             # Stay alive in capital-preservation mode instead of halting: the
             # competition requires at least one trade per UTC day, so a halted
             # agent would be disqualified on trade count even after surviving
-            # the drawdown gate. Only the tiny compliance-swap backstop runs here.
-            _ensure_daily_minimum_trade(
-                settings,
-                router,
-                guardrails,
-                datetime.now(timezone.utc),
-                portfolio_value,
-                twak_interface=twak_interface,
-                liquidity_analyzer=liquidity_analyzer,
-            )
+            # the drawdown gate. Only the tiny compliance-swap backstop runs here
+            # -- unless the operator has set the RWEAL manual halt, which is a
+            # deliberate full stop that overrides the compliance backstop. Use a
+            # live re-check so a halt set mid-cycle is honoured immediately.
+            if not (
+                rweal_manual_halt
+                or (event_filter is not None and event_filter.manual_halt_active())
+            ):
+                _ensure_daily_minimum_trade(
+                    settings,
+                    router,
+                    guardrails,
+                    datetime.now(timezone.utc),
+                    portfolio_value,
+                    twak_interface=twak_interface,
+                    liquidity_analyzer=liquidity_analyzer,
+                    event_filter=event_filter,
+                )
             if settings.demo_mode:
                 _print_demo_cycle_summary(
                     cycle_number,
@@ -675,9 +728,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             if max_cycles is not None and cycles_completed >= max_cycles:
                 LOGGER.info("Completed %s cycle(s); exiting", cycles_completed)
                 break
-            sleep_until = time.monotonic() + settings.loop_seconds
-            while running and time.monotonic() < sleep_until:
-                time.sleep(min(1.0, sleep_until - time.monotonic()))
+            _interruptible_sleep()
             continue
 
         _process_position_exits(position_manager, router, guardrails, market_snapshot, portfolio_value, price_cache)
@@ -714,6 +765,16 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                 exclude_symbols.update(pending_swap_cooldowns)
                 if settings.strategy_mode == "breakout":
                     exclude_symbols.update(recent_near_miss_excludes)
+                # RWEAL Phase 1: exclude symbols in an active event blackout from
+                # selection so a blacked-out top pick does not suppress otherwise
+                # valid alternatives (symbol-specific events block only that
+                # symbol, not the whole universe). GLOBAL/macro blackouts are
+                # handled at the cycle-top gate, not here.
+                rweal_blacked_out: set[str] = set()
+                if event_filter is not None:
+                    rweal_blacked_out = event_filter.active_symbol_blackouts(now_utc)
+                    if rweal_blacked_out:
+                        exclude_symbols.update(rweal_blacked_out)
                 candidate = _evaluate_universe_v25(
                     market_snapshot,
                     portfolio_value,
@@ -725,6 +786,14 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     sentiment_result=sentiment_result,
                     ml_bundle=ml_bundle,
                 )
+                # Defensive backstop: drop any discretionary candidate that still
+                # carries an active blackout (e.g. a path that bypassed excludes).
+                if candidate is not None and event_filter is not None:
+                    _rweal_symbol = event_filter.symbol_blackout(candidate.symbol, now_utc)
+                    if _rweal_symbol:
+                        LOGGER.warning("Entry blocked by RWEAL: %s", _rweal_symbol)
+                        decision_reasons.append(f"RWEAL: {_rweal_symbol}")
+                        candidate = None
                 if candidate is None and settings.strategy_mode != "scalping":
                     minimum_trade = check_daily_minimum_compliance(
                         guardrails, regime_result, cycle_number, now_utc, settings
@@ -737,7 +806,34 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                             settings,
                             risk_decision,
                         )
+                        # A compliance trade should not be routed into a symbol
+                        # facing a scheduled event; fall through to the fixed
+                        # stable->token compliance swap instead.
+                        if (
+                            candidate is not None
+                            and event_filter is not None
+                            and event_filter.symbol_blackout(candidate.symbol, now_utc)
+                        ):
+                            LOGGER.warning(
+                                "RWEAL: compliance candidate %s is blacked out; "
+                                "falling back to fixed compliance swap",
+                                candidate.symbol,
+                            )
+                            decision_reasons.append("RWEAL: compliance symbol blacked out")
+                            candidate = None
 
+            # RWEAL Phase 1: final, instant halt guard. Re-check the control file
+            # immediately before execution so a TRADING_HALT that appears mid-cycle
+            # (after the cycle-top gate) cannot still open a position this cycle.
+            if (
+                candidate is not None
+                and event_filter is not None
+                and event_filter.manual_halt_active()
+            ):
+                rweal_manual_halt = True
+                LOGGER.warning("RWEAL manual halt detected pre-entry; skipping execution")
+                decision_reasons.append("RWEAL: manual halt (pre-execution)")
+                candidate = None
             if not skip_entries:
                 if candidate is None:
                     decision_reasons.append("No candidate passed gates")
@@ -762,7 +858,13 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
                     if attempt.entered:
                         action = "ENTER"
 
-        if action != "ENTER" and _ensure_daily_minimum_trade(
+        # Live halt re-check (not the cycle-top cache): this backstop runs at the
+        # very end of the cycle, after all data work, so a halt set mid-cycle
+        # must still suppress the compliance swap.
+        rweal_halt_now = rweal_manual_halt or (
+            event_filter is not None and event_filter.manual_halt_active()
+        )
+        if action != "ENTER" and not rweal_halt_now and _ensure_daily_minimum_trade(
             settings,
             router,
             guardrails,
@@ -770,6 +872,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             portfolio_value,
             twak_interface=twak_interface,
             liquidity_analyzer=liquidity_analyzer,
+            event_filter=event_filter,
         ):
             action = "ENTER"
             decision_reasons.append("compliance: daily minimum trade")
@@ -873,9 +976,7 @@ def run_agent(settings: Settings, max_cycles: int | None = None) -> None:
             LOGGER.info("Completed %s cycle(s); exiting", cycles_completed)
             break
 
-        sleep_until = time.monotonic() + settings.loop_seconds
-        while running and time.monotonic() < sleep_until:
-            time.sleep(min(1.0, sleep_until - time.monotonic()))
+        _interruptible_sleep()
 
 
 def _sentiment_cache_ttl(settings: Settings) -> int:
@@ -1033,6 +1134,8 @@ def _entries_blocked_reason(
             return "scalping_guardrails"
     daily_count = int(getattr(guardrails, "_daily_trade_count", 0))
     if daily_count >= risk_decision.max_daily_trades:
+        if risk_decision.state == RiskState.REDUCED_RISK:
+            return "reduced_risk_daily_trade_limit"
         return "daily_trade_limit"
     return None
 
@@ -2538,6 +2641,7 @@ def _ensure_daily_minimum_trade(
     *,
     twak_interface: TWAKInterface | None = None,
     liquidity_analyzer: LiquidityAnalyzer | None = None,
+    event_filter: EventRiskFilter | None = None,
 ) -> bool:
     """Fail-safe for the competition's one-trade-per-UTC-day minimum.
 
@@ -2571,6 +2675,19 @@ def _ensure_daily_minimum_trade(
         counter = "USDC" if stable != "USDC" else "USDT"
     if "BNB" in {stable, counter}:
         LOGGER.error("Compliance minimum trade refused because BNB would be used as a leg")
+        return False
+    # RWEAL: never route the fixed compliance swap into a token facing a
+    # SYMBOL-SPECIFIC scheduled event. COMPLIANCE_TO_SYMBOL is hardcoded, so
+    # without this guard a blacked-out counter (e.g. TWT) would be bought
+    # directly into the event. Use active_symbol_blackouts (which EXCLUDES
+    # GLOBAL/macro) so the differentiate policy holds: a GLOBAL macro blackout
+    # still lets the tiny compliance swap fire (avoid DQ); only a per-symbol
+    # event on the counter blocks it. Manual halt is handled by the callers.
+    if event_filter is not None and counter in event_filter.active_symbol_blackouts(now_utc):
+        LOGGER.warning(
+            "Skipping fixed compliance swap: counter %s in a symbol-specific event blackout",
+            counter,
+        )
         return False
     if twak_interface is not None and liquidity_analyzer is not None:
         try:

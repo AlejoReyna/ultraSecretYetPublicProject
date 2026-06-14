@@ -320,10 +320,29 @@ class Guardrails:
         base_risk = self.settings.base_risk_per_trade_pct
         strict_slippage = min(self.settings.max_slippage_pct, self.settings.risk_off_max_slippage_pct)
         if state == RiskState.NORMAL:
-            return RiskDecision(state, True, 1.0, self.settings.max_slippage_pct, self.settings.max_daily_trades, base_risk, reasons)
+            return RiskDecision(
+                state,
+                True,
+                1.0,
+                self.settings.max_slippage_pct,
+                self._configured_max_daily_trades(),
+                base_risk,
+                reasons,
+            )
         if state == RiskState.REDUCED_RISK:
-            return RiskDecision(state, True, 0.5, strict_slippage, 1, base_risk * 0.5, reasons)
+            return RiskDecision(
+                state,
+                True,
+                0.5,
+                strict_slippage,
+                self._configured_max_daily_trades(),
+                base_risk * 0.5,
+                reasons,
+            )
         return RiskDecision(state, False, 0.0, strict_slippage, 0, 0.0, reasons)
+
+    def _configured_max_daily_trades(self) -> int:
+        return max(0, int(getattr(self.settings, "max_daily_trades", 0) or 0))
 
     def _reset_recorded_loss_day_if_needed(self, current_time: datetime | None = None) -> None:
         now = current_time or self._now()
